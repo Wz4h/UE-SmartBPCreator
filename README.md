@@ -87,6 +87,12 @@ Create Blueprint
 YourProject/Plugins/SmartBPCreator/
 ```
 
+Or install it as an engine plugin:
+
+```
+UE_5.x/Engine/Plugins/Marketplace/SmartBPCreator/
+```
+
 3. Open Unreal Engine
 4. Enable plugin in **Edit → Plugins**
 5. Restart Editor

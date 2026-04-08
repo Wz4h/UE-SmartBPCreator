@@ -3,21 +3,17 @@
 	"Version": 1,
 	"VersionName": "1.0",
 	"FriendlyName": "SmartBPCreator",
-	"Description": "",
-	"Category": "Other",
-	"CreatedBy": "",
-	"CreatedByURL": "",
-	"DocsURL": "",
-	"MarketplaceURL": "",
-	"SupportURL": "",
+	"Description": "Create Blueprint subclasses with automatic naming directly from the Content Browser.",
+	"Category": "Editor",
+	"EnabledByDefault": true,
 	"CanContainContent": true,
 	"IsBetaVersion": false,
 	"IsExperimentalVersion": false,
-	"Installed": false,
+	"Installed": true,
 	"Modules": [
 		{
 			"Name": "SmartBPCreator",
-			"Type": "Runtime",
+			"Type": "Editor",
 			"LoadingPhase": "Default"
 		}
 	]

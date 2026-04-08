@@ -168,6 +168,19 @@ FString FSmartBPCreationService::NormalizeTargetFolder(const FString& InFolder)
 
 	Result.ReplaceInline(TEXT("\\"), TEXT("/"));
 
+	if (Result.StartsWith(TEXT("/All/Plugins/")))
+	{
+		Result = FString::Printf(TEXT("/%s"), *Result.RightChop(13));
+	}
+	else if (Result.StartsWith(TEXT("/All/Game")))
+	{
+		Result = FString::Printf(TEXT("/Game%s"), *Result.RightChop(9));
+	}
+	else if (Result.StartsWith(TEXT("/All/Engine")))
+	{
+		Result = FString::Printf(TEXT("/Engine%s"), *Result.RightChop(11));
+	}
+
 	if (!Result.StartsWith(TEXT("/")))
 	{
 		Result = FString::Printf(TEXT("/Game/%s"), *Result);
