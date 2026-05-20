@@ -2,8 +2,8 @@
 	"FileVersion": 3,
 	"Version": 1,
 	"VersionName": "1.0",
-	"FriendlyName": "SmartBPCreator",
-	"Description": "Create Blueprint subclasses with automatic naming directly from the Content Browser.",
+	"FriendlyName": "SmartAssetCreator",
+	"Description": "Create common Unreal assets with automatic naming and configurable prefix rules directly from the Content Browser.",
 	"Category": "Editor",
 	"EnabledByDefault": true,
 	"CanContainContent": true,
@@ -12,7 +12,7 @@
 	"Installed": true,
 	"Modules": [
 		{
-			"Name": "SmartBPCreator",
+			"Name": "SmartAssetCreator",
 			"Type": "Editor",
 			"LoadingPhase": "Default"
 		}

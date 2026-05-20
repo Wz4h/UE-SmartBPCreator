@@ -1,151 +1,99 @@
-# SmartBPCreator
+# SmartAssetCreator
 
-Unreal Engine Editor Plugin
+Unreal Engine editor plugin for creating common assets with automatic naming and configurable prefix rules.
 
----
+## Features
 
-## ✨ Features
+- Create common assets directly from Content Browser.
+- Built-in support for:
+  - Actor Blueprint -> `BP_`
+  - Widget Blueprint -> `WBP_`
+  - Anim Blueprint -> `ABP_`
+  - Interface Blueprint -> `BPI_`
+  - Data Asset -> `DA_`
+  - Data Table -> `DT_`
+  - Material -> `M_`
+  - Material Instance -> `MI_`
+- Create child assets from a selected Blueprint asset.
+- Show a live name preview before creation.
+- Automatically select the new asset and enter rename mode.
+- Do not auto-open the created asset editor.
+- Resolve name collisions with `_01`, `_02`, and so on.
+- Support user-defined prefix rules matched by inheritance distance.
 
-* Create Blueprint with automatic naming (`BP_XXX`)
-* Works directly in Content Browser **right-click (empty area / Add New menu)**
-* Automatically selects the new asset
-* Instantly enters rename mode
-* No need to manually open Blueprint editor
+## Entry Points
 
----
+- Content Browser empty area or `Add New` menu:
+  `Create Smart Asset...`
+- Blueprint asset right-click menu:
+  `Create Child Asset...`
 
-## 📦 Usage
+## Settings
 
-1. Open Content Browser
-2. Right-click in an empty area (or use Add New menu)
-3. Click **Create Blueprint (Auto Name)**
-4. Select a parent class
-5. Blueprint is created and ready to rename
+Open:
 
----
+`Project Settings -> Plugins -> SmartAssetCreator`
 
-## 🎯 Naming Rule
+You can configure:
 
-```
-BP_ + ClassName
-```
+- Fixed asset-type prefixes for `Data Table`, `Material`, and `Material Instance`
+- Class prefix rules for `Actor Blueprint`, `Widget Blueprint`, `Anim Blueprint`, `Interface Blueprint`, and `Data Asset`
+- Whether child blueprints reuse the parent blueprint asset name
+- Whether known prefixes are stripped from parent blueprint names
+- Child blueprint suffix
 
-### Examples
+## Workflow
 
-```
-Actor → BP_Actor
-Character → BP_Character
-UserWidget → BP_UserWidget
-```
+1. Open Content Browser.
+2. Choose `Create Smart Asset...`.
+3. Select the asset type.
+4. Select the parent class or required parameters.
+5. Check the live name preview.
+6. Click `Create`.
+7. Rename the created asset immediately if needed.
 
----
+## Architecture
 
-## 🧠 Why this plugin?
+- `Core`: request and result models
+- `Rule`: prefix rules and resolver
+- `Settings`: persistent user configuration
+- `Creator`: asset-type-specific creation logic
+- `Service`: unified creation orchestration
+- `UI`: create window
+- `Module`: menu registration, windows, icon style, and Content Browser integration
 
-### Default UE workflow
+## Installation
 
-```
-Create Blueprint
-→ Rename
-→ Open Blueprint Editor
-→ Close
-```
+Project plugin:
 
-### With SmartBPCreator
-
-```
-Create Blueprint
-→ Rename (Done)
-```
-
-👉 Faster, cleaner, and closer to real usage habits
-
----
-
-## 🔧 Technical Notes
-
-* Uses `ContentBrowser ToolMenus` to inject menu entry
-* Converts virtual path → internal package path (fixes invisible asset issue)
-* Handles name conflicts safely (no crash on duplicate names)
-* Uses `FTSTicker` to trigger rename in next frame (ensures UI sync)
-
----
-
-## 🛠 Requirements
-
-* Unreal Engine 5.x
-* Editor module plugin
-
----
-
-## 📁 Installation
-
-1. Download or clone this repository
-2. Put the plugin into:
-
-```
+```text
 YourProject/Plugins/SmartBPCreator/
 ```
 
-Or install it as an engine plugin:
+Engine plugin:
 
-```
+```text
 UE_5.x/Engine/Plugins/Marketplace/SmartBPCreator/
 ```
 
-3. Open Unreal Engine
-4. Enable plugin in **Edit → Plugins**
-5. Restart Editor
+Then:
 
----
+1. Enable the plugin in Unreal Editor.
+2. Restart the editor if prompted.
 
-## 📌 Current Status
+## Technical Notes
 
-**V1.0.0**
+- Uses `ToolMenus` to inject Content Browser entries.
+- Converts virtual Content Browser paths to internal package paths.
+- Uses a creator-dispatch architecture so new asset types can be added cleanly.
+- Keeps naming rules and creation logic separate for easier extension.
+- Class-based assets resolve prefixes from class rules only; fixed asset types use asset-type prefixes.
 
-* Core workflow complete
-* Stable for daily use
+## Current Status
 
----
+This repository now runs on the new `SmartAssetCreator` module and supports the M1 to M4 migration scope:
 
-## 🚀 Future Plans
-
-* Widget Blueprint support
-* Anim Blueprint support
-* Custom naming rules
-* Folder auto-classification (UI / Gameplay / etc.)
-* Batch creation support
-
----
-
-## 📷 Preview
-
-(Add screenshot here)
-
----
-
-## 📄 License
-
-MIT (or your choice)
-
----
-
-## 💡 Author Notes
-
-This plugin focuses on **high-frequency workflow optimization** rather than feature complexity.
-
-The goal is simple:
-
-> Remove friction from Blueprint creation.
-
----
-
-## ⭐ If you find this useful
-
-Give it a star on GitHub 👍
-
----
-
-## 📬 Feedback
-
-Feel free to open issues or suggestions.
+- module and architecture migration
+- configurable prefix rules
+- creator dispatch for multiple asset types
+- unified asset creation window and settings window
