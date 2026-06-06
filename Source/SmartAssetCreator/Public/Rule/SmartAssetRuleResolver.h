@@ -9,14 +9,13 @@ class SMARTASSETCREATOR_API FSmartAssetRuleResolver
 {
 public:
 	static const USmartAssetSettings* GetSettings();
+	static void LoadConfiguredRuleClasses();
 	static FString ResolvePrefix(const FSmartAssetCreateRequest& Request);
+	static FString ResolveClassPrefix(const UClass* ParentClass, const FString& FallbackPrefix);
 	static FString BuildAssetBaseName(const FSmartAssetCreateRequest& Request);
 	static FString StripKnownPrefix(const FString& InName);
 
 private:
 	static FString ResolveBuiltInPrefix(const FSmartAssetCreateRequest& Request);
-	static bool UsesClassRules(ESmartAssetType AssetType);
-	static UClass* ResolveRuleClassCandidate(const FSmartAssetCreateRequest& Request);
-	static int32 ComputeInheritanceDistance(const UClass* ChildClass, const UClass* AncestorClass);
 	static FString BuildNameStem(const FSmartAssetCreateRequest& Request);
 };

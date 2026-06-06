@@ -2,6 +2,7 @@
 
 #include "Animation/AnimBlueprint.h"
 #include "Animation/AnimBlueprintGeneratedClass.h"
+#include "Animation/AnimInstance.h"
 #include "AssetToolsModule.h"
 #include "Blueprint/UserWidget.h"
 #include "Blueprint/WidgetBlueprintGeneratedClass.h"
@@ -48,34 +49,25 @@ namespace
 
 bool FSmartBlueprintCreator::CanCreate(const FSmartAssetCreateRequest& Request) const
 {
-	return Request.AssetType == ESmartAssetType::ActorBlueprint
-		|| Request.AssetType == ESmartAssetType::WidgetBlueprint
-		|| Request.AssetType == ESmartAssetType::AnimBlueprint
-		|| Request.AssetType == ESmartAssetType::InterfaceBlueprint;
+	return Request.UnderlyingKind == ESmartUnderlyingAssetKind::Blueprint;
 }
 
 FSmartAssetCreateResult FSmartBlueprintCreator::Create(const FSmartAssetCreateRequest& Request, const FString& AssetName) const
 {
-	switch (Request.AssetType)
+	switch (Request.BlueprintTemplateKind)
 	{
-	case ESmartAssetType::ActorBlueprint:
-		return CreateActorBlueprint(Request, AssetName);
-	case ESmartAssetType::WidgetBlueprint:
+	case ESmartBlueprintTemplateKind::Widget:
 		return CreateWidgetBlueprint(Request, AssetName);
-	case ESmartAssetType::AnimBlueprint:
+	case ESmartBlueprintTemplateKind::Anim:
 		return CreateAnimBlueprint(Request, AssetName);
-	case ESmartAssetType::InterfaceBlueprint:
+	case ESmartBlueprintTemplateKind::Interface:
 		return CreateInterfaceBlueprint(Request, AssetName);
 	default:
-		break;
+		return CreateClassBlueprint(Request, AssetName);
 	}
-
-	FSmartAssetCreateResult Result;
-	Result.ErrorMessage = TEXT("Unsupported blueprint asset type.");
-	return Result;
 }
 
-FSmartAssetCreateResult FSmartBlueprintCreator::CreateActorBlueprint(const FSmartAssetCreateRequest& Request, const FString& AssetName) const
+FSmartAssetCreateResult FSmartBlueprintCreator::CreateClassBlueprint(const FSmartAssetCreateRequest& Request, const FString& AssetName) const
 {
 	FSmartAssetCreateResult Result;
 	UClass* ParentClass = ResolveBlueprintParentClass(Request);
@@ -125,12 +117,17 @@ FSmartAssetCreateResult FSmartBlueprintCreator::CreateAnimBlueprint(const FSmart
 		Result.ErrorMessage = TEXT("Anim Blueprint requires a parent class derived from UAnimInstance.");
 		return Result;
 	}
+	if (!Request.bTemplateAnimBlueprint && !Request.TargetSkeleton)
+	{
+		Result.ErrorMessage = TEXT("Anim Blueprint requires a target Skeleton unless it is created as a template.");
+		return Result;
+	}
 
 	UAnimBlueprintFactory* Factory = NewObject<UAnimBlueprintFactory>();
 	Factory->ParentClass = ParentClass;
 	Factory->BlueprintType = BPTYPE_Normal;
 	Factory->TargetSkeleton = Request.TargetSkeleton;
-	Factory->bTemplate = Request.bTemplateAnimBlueprint || Request.TargetSkeleton == nullptr;
+	Factory->bTemplate = Request.bTemplateAnimBlueprint;
 
 	return CreateAssetWithFactory<UAnimBlueprint>(Request.TargetFolder, AssetName, Factory);
 }

@@ -15,13 +15,19 @@
 #include "Engine/Blueprint.h"
 #include "Engine/DataAsset.h"
 #include "Engine/DataTable.h"
+#include "DataTableEditorUtils.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "Misc/PackageName.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/KismetEditorUtilities.h"
 #include "Rule/SmartAssetRuleResolver.h"
+#include "Service/SmartCreationOptionBuilder.h"
 
 FSmartAssetCreationService::FSmartAssetCreationService()
 {
+	FSmartAssetRuleResolver::LoadConfiguredRuleClasses();
+
 	Creators.Add(MakeShared<FSmartBlueprintCreator>());
 	Creators.Add(MakeShared<FSmartDataAssetCreator>());
 	Creators.Add(MakeShared<FSmartDataTableCreator>());
@@ -33,6 +39,13 @@ FSmartAssetCreateResult FSmartAssetCreationService::CreateAsset(const FSmartAsse
 {
 	FSmartAssetCreateRequest PreparedRequest = PrepareRequest(Request);
 	PreparedRequest.TargetFolder = NormalizeTargetFolder(PreparedRequest.TargetFolder);
+
+	FSmartAssetCreateResult InvalidRequestResult;
+	InvalidRequestResult.ErrorMessage = ValidatePreparedRequest(PreparedRequest);
+	if (!InvalidRequestResult.ErrorMessage.IsEmpty())
+	{
+		return InvalidRequestResult;
+	}
 
 	const FString BaseName = FSmartAssetRuleResolver::BuildAssetBaseName(PreparedRequest);
 	const FString UniqueName = MakeUniqueAssetName(PreparedRequest.TargetFolder, BaseName);
@@ -63,46 +76,11 @@ FString FSmartAssetCreationService::BuildAssetNamePreview(const FSmartAssetCreat
 	return MakeUniqueAssetName(PreparedRequest.TargetFolder, FSmartAssetRuleResolver::BuildAssetBaseName(PreparedRequest));
 }
 
-UClass* FSmartAssetCreationService::GetDefaultParentClass(ESmartAssetType AssetType) const
+FString FSmartAssetCreationService::ValidateRequest(const FSmartAssetCreateRequest& Request) const
 {
-	switch (AssetType)
-	{
-	case ESmartAssetType::ActorBlueprint:
-		return UObject::StaticClass();
-	case ESmartAssetType::WidgetBlueprint:
-		return UUserWidget::StaticClass();
-	case ESmartAssetType::AnimBlueprint:
-		return UAnimInstance::StaticClass();
-	case ESmartAssetType::DataAsset:
-		return UDataAsset::StaticClass();
-	default:
-		return nullptr;
-	}
-}
-
-ESmartAssetType FSmartAssetCreationService::InferAssetTypeFromBlueprint(const UBlueprint* Blueprint) const
-{
-	if (!Blueprint || !Blueprint->GeneratedClass)
-	{
-		return ESmartAssetType::ActorBlueprint;
-	}
-
-	if (Blueprint->BlueprintType == BPTYPE_Interface)
-	{
-		return ESmartAssetType::InterfaceBlueprint;
-	}
-
-	if (Blueprint->GeneratedClass->IsChildOf(UUserWidget::StaticClass()))
-	{
-		return ESmartAssetType::WidgetBlueprint;
-	}
-
-	if (Blueprint->GeneratedClass->IsChildOf(UAnimInstance::StaticClass()))
-	{
-		return ESmartAssetType::AnimBlueprint;
-	}
-
-	return ESmartAssetType::ActorBlueprint;
+	FSmartAssetCreateRequest PreparedRequest = PrepareRequest(Request);
+	PreparedRequest.TargetFolder = NormalizeTargetFolder(PreparedRequest.TargetFolder);
+	return ValidatePreparedRequest(PreparedRequest);
 }
 
 FString FSmartAssetCreationService::NormalizeTargetFolder(const FString& InFolder) const
@@ -169,20 +147,137 @@ FSmartAssetCreateRequest FSmartAssetCreationService::PrepareRequest(const FSmart
 {
 	FSmartAssetCreateRequest PreparedRequest = Request;
 
-	if (PreparedRequest.ParentBlueprint && PreparedRequest.ParentBlueprint->GeneratedClass && PreparedRequest.ParentClass == nullptr)
+	if (PreparedRequest.ParentBlueprint && PreparedRequest.ParentBlueprint->GeneratedClass)
 	{
 		PreparedRequest.ParentClass = PreparedRequest.ParentBlueprint->GeneratedClass;
 	}
 
 	if (PreparedRequest.ParentBlueprint)
 	{
-		PreparedRequest.AssetType = InferAssetTypeFromBlueprint(PreparedRequest.ParentBlueprint);
+		PreparedRequest.UnderlyingKind = ESmartUnderlyingAssetKind::Blueprint;
+		PreparedRequest.BlueprintTemplateKind = FSmartCreationOptionBuilder::ResolveBlueprintTemplateKind(PreparedRequest.ParentClass);
+
+		if (const UAnimBlueprint* ParentAnimBlueprint = Cast<UAnimBlueprint>(PreparedRequest.ParentBlueprint))
+		{
+			PreparedRequest.TargetSkeleton = ParentAnimBlueprint->TargetSkeleton;
+			PreparedRequest.bTemplateAnimBlueprint = ParentAnimBlueprint->bIsTemplate;
+		}
 	}
 
 	if (PreparedRequest.ParentClass == nullptr)
 	{
-		PreparedRequest.ParentClass = GetDefaultParentClass(PreparedRequest.AssetType);
+		if (PreparedRequest.UnderlyingKind == ESmartUnderlyingAssetKind::Blueprint)
+		{
+			switch (PreparedRequest.BlueprintTemplateKind)
+			{
+			case ESmartBlueprintTemplateKind::Widget:
+				PreparedRequest.ParentClass = UUserWidget::StaticClass();
+				break;
+			case ESmartBlueprintTemplateKind::Anim:
+				PreparedRequest.ParentClass = UAnimInstance::StaticClass();
+				break;
+			case ESmartBlueprintTemplateKind::Interface:
+				PreparedRequest.ParentClass = UInterface::StaticClass();
+				break;
+			default:
+				PreparedRequest.ParentClass = UObject::StaticClass();
+				break;
+			}
+		}
+		else if (PreparedRequest.UnderlyingKind == ESmartUnderlyingAssetKind::DataAsset)
+		{
+			PreparedRequest.ParentClass = UDataAsset::StaticClass();
+		}
+	}
+
+	if (PreparedRequest.BlueprintTemplateKind == ESmartBlueprintTemplateKind::Normal)
+	{
+		PreparedRequest.BlueprintTemplateKind = FSmartCreationOptionBuilder::ResolveBlueprintTemplateKind(PreparedRequest.ParentClass);
+	}
+
+	if (PreparedRequest.BlueprintTemplateKind == ESmartBlueprintTemplateKind::Interface)
+	{
+		PreparedRequest.ParentClass = UInterface::StaticClass();
 	}
 
 	return PreparedRequest;
+}
+
+FString FSmartAssetCreationService::ValidatePreparedRequest(const FSmartAssetCreateRequest& Request) const
+{
+	if (!FPackageName::IsValidLongPackageName(Request.TargetFolder, true))
+	{
+		return FString::Printf(TEXT("'%s' is not a valid Unreal package folder."), *Request.TargetFolder);
+	}
+
+	if (Request.TargetFolder == TEXT("/Engine") || Request.TargetFolder.StartsWith(TEXT("/Engine/")))
+	{
+		return TEXT("Assets cannot be created in Engine Content.");
+	}
+
+	switch (Request.UnderlyingKind)
+	{
+	case ESmartUnderlyingAssetKind::Blueprint:
+		if (Request.ParentBlueprint)
+		{
+			if (Request.ParentBlueprint->BlueprintType == BPTYPE_Interface
+				|| !FBlueprintEditorUtils::CanCreateChildBlueprint(Request.ParentBlueprint))
+			{
+				return TEXT("The selected Blueprint does not support child Blueprint creation.");
+			}
+		}
+		if (!Request.ParentClass || !FKismetEditorUtilities::CanCreateBlueprintOfClass(Request.ParentClass))
+		{
+			return TEXT("Select a valid Blueprint parent class.");
+		}
+		if (Request.BlueprintTemplateKind == ESmartBlueprintTemplateKind::Widget
+			&& !Request.ParentClass->IsChildOf(UUserWidget::StaticClass()))
+		{
+			return TEXT("Widget Blueprint parent class must derive from UUserWidget.");
+		}
+		if (Request.BlueprintTemplateKind == ESmartBlueprintTemplateKind::Anim
+			&& !Request.ParentClass->IsChildOf(UAnimInstance::StaticClass()))
+		{
+			return TEXT("Anim Blueprint parent class must derive from UAnimInstance.");
+		}
+		if (Request.BlueprintTemplateKind == ESmartBlueprintTemplateKind::Anim
+			&& !Request.bTemplateAnimBlueprint
+			&& !Request.TargetSkeleton)
+		{
+			return TEXT("Select a target Skeleton or enable template Anim Blueprint creation.");
+		}
+		break;
+	case ESmartUnderlyingAssetKind::DataAsset:
+		if (!Request.ParentClass || !Request.ParentClass->IsChildOf(UDataAsset::StaticClass()))
+		{
+			return TEXT("Select a class derived from UDataAsset.");
+		}
+		if (Request.ParentClass->HasAnyClassFlags(CLASS_Abstract))
+		{
+			return TEXT("Select a concrete Data Asset class. Abstract classes cannot be instantiated.");
+		}
+		break;
+	case ESmartUnderlyingAssetKind::DataTable:
+		if (!Request.RowStruct || !FDataTableEditorUtils::IsValidTableStruct(Request.RowStruct))
+		{
+			return TEXT("Select a valid row struct for the Data Table.");
+		}
+		break;
+	case ESmartUnderlyingAssetKind::MaterialInstance:
+		if (!Request.ParentMaterial)
+		{
+			return TEXT("Select a parent material for the Material Instance.");
+		}
+		break;
+	default:
+		break;
+	}
+
+	const FString BaseName = FSmartAssetRuleResolver::BuildAssetBaseName(Request);
+	if (BaseName.IsEmpty() || !FPackageName::IsValidObjectPath(FString::Printf(TEXT("%s/%s.%s"), *Request.TargetFolder, *BaseName, *BaseName)))
+	{
+		return FString::Printf(TEXT("'%s' is not a valid Unreal asset name."), *BaseName);
+	}
+
+	return FString();
 }

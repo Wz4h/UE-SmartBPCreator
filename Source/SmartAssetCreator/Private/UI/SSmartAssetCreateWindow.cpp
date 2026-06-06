@@ -1,11 +1,13 @@
 #include "UI/SSmartAssetCreateWindow.h"
 
 #include "AssetRegistry/AssetData.h"
+#include "Animation/AnimBlueprint.h"
 #include "Animation/AnimInstance.h"
 #include "ClassViewerFilter.h"
 #include "ClassViewerModule.h"
 #include "Core/SmartAssetCreateRequest.h"
 #include "Core/SmartAssetCreateResult.h"
+#include "DataTableEditorUtils.h"
 #include "Blueprint/UserWidget.h"
 #include "Engine/Blueprint.h"
 #include "Engine/DataAsset.h"
@@ -13,8 +15,14 @@
 #include "Animation/Skeleton.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Materials/MaterialInterface.h"
+#include "Misc/MessageDialog.h"
+#include "Modules/ModuleManager.h"
 #include "PropertyCustomizationHelpers.h"
-#include "Settings/SmartAssetSettings.h"
+#include "Rule/SmartAssetRuleResolver.h"
+#include "StructViewerFilter.h"
+#include "StructViewerModule.h"
+#include "Styling/AppStyle.h"
+#include "Widgets/Images/SImage.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SCheckBox.h"
@@ -22,6 +30,7 @@
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SSeparator.h"
+#include "Widgets/Layout/SScrollBox.h"
 #include "Widgets/Layout/SUniformGridPanel.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/SWindow.h"
@@ -31,8 +40,9 @@ namespace
 	class FSmartAssetClassFilter : public IClassViewerFilter
 	{
 	public:
-		explicit FSmartAssetClassFilter(UClass* InBaseClass)
+		explicit FSmartAssetClassFilter(UClass* InBaseClass, bool bInAllowDerivedClasses)
 			: BaseClass(InBaseClass)
+			, bAllowDerivedClasses(bInAllowDerivedClasses)
 		{
 		}
 
@@ -41,7 +51,8 @@ namespace
 			const UClass* InClass,
 			TSharedRef<FClassViewerFilterFuncs> InFilterFuncs) override
 		{
-			return BaseClass && InClass && InClass->IsChildOf(BaseClass) && !InClass->HasAnyClassFlags(CLASS_Abstract | CLASS_Deprecated | CLASS_NewerVersionExists);
+			const bool bMatchesBaseClass = bAllowDerivedClasses ? InClass && InClass->IsChildOf(BaseClass) : InClass == BaseClass;
+			return BaseClass && bMatchesBaseClass && !InClass->HasAnyClassFlags(CLASS_Abstract | CLASS_Deprecated | CLASS_NewerVersionExists);
 		}
 
 		virtual bool IsUnloadedClassAllowed(
@@ -54,6 +65,11 @@ namespace
 				return false;
 			}
 
+			if (!bAllowDerivedClasses)
+			{
+				return false;
+			}
+
 			TSet<const UClass*> AllowedClasses;
 			AllowedClasses.Add(BaseClass);
 			return InFilterFuncs->IfInChildOfClassesSet(AllowedClasses, InUnloadedClassData) != EFilterReturn::Failed;
@@ -61,29 +77,66 @@ namespace
 
 	private:
 		UClass* BaseClass = nullptr;
+		bool bAllowDerivedClasses = true;
 	};
+
+	class FSmartDataTableStructFilter : public IStructViewerFilter
+	{
+	public:
+		virtual bool IsStructAllowed(
+			const FStructViewerInitializationOptions& InInitOptions,
+			const UScriptStruct* InStruct,
+			TSharedRef<FStructViewerFilterFuncs> InFilterFuncs) override
+		{
+			return InStruct && FDataTableEditorUtils::IsValidTableStruct(InStruct);
+		}
+
+		virtual bool IsUnloadedStructAllowed(
+			const FStructViewerInitializationOptions& InInitOptions,
+			const FSoftObjectPath& InStructPath,
+			TSharedRef<FStructViewerFilterFuncs> InFilterFuncs) override
+		{
+			// Blueprint structs must be loaded before DataTable validity can be checked.
+			return true;
+		}
+	};
+
+	int32 ComputeClassDistance(const UClass* ChildClass, const UClass* AncestorClass)
+	{
+		if (!ChildClass || !AncestorClass)
+		{
+			return INDEX_NONE;
+		}
+
+		int32 Distance = 0;
+		for (const UClass* Current = ChildClass; Current; Current = Current->GetSuperClass(), ++Distance)
+		{
+			if (Current == AncestorClass)
+			{
+				return Distance;
+			}
+		}
+
+		return INDEX_NONE;
+	}
 }
 
 void SSmartAssetCreateWindow::Construct(const FArguments& InArgs)
 {
 	ParentWindowWeak = InArgs._ParentWindow;
 	TargetFolder = InArgs._TargetFolder;
-	SelectedAssetType = InArgs._InitialAssetType;
-	bLockAssetType = InArgs._LockAssetType;
+	InitialUnderlyingKind = InArgs._InitialUnderlyingKind;
+	bLockCreationOption = InArgs._LockCreationOption;
 	InitialParentBlueprint = InArgs._InitialParentBlueprint;
 	OnCreateRequested = InArgs._OnCreateRequested;
 	OnPreviewRequested = InArgs._OnPreviewRequested;
-	OnDefaultClassRequested = InArgs._OnDefaultClassRequested;
+	OnValidationRequested = InArgs._OnValidationRequested;
+	OnOpenSettingsRequested = InArgs._OnOpenSettingsRequested;
 
-	RebuildAssetTypeOptions();
+	RebuildCreationOptions();
 
-	RowStructOptions.Reset();
-	for (UScriptStruct* Struct : GetAvailableRowStructs())
-	{
-		RowStructOptions.Add(MakeShared<UScriptStruct*>(Struct));
-	}
-
-	RefreshDefaultsForAssetType();
+	RefreshDefaultsForCreationOption();
+	InvalidatePreview();
 
 	ChildSlot
 	[
@@ -95,8 +148,28 @@ void SSmartAssetCreateWindow::Construct(const FArguments& InArgs)
 			+ SVerticalBox::Slot()
 			.AutoHeight()
 			[
-				SNew(STextBlock)
-				.Text(NSLOCTEXT("SmartAssetCreator", "CreateWindowTitle", "Create Smart Asset"))
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot()
+				.FillWidth(1.0f)
+				.VAlign(VAlign_Center)
+				[
+					SNew(STextBlock)
+					.Text(NSLOCTEXT("SmartAssetCreator", "CreateWindowTitle", "Create Smart Asset"))
+				]
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				[
+					SNew(SButton)
+					.ButtonStyle(FAppStyle::Get(), "SimpleButton")
+					.ContentPadding(2.0f)
+					.ToolTipText(NSLOCTEXT("SmartAssetCreator", "SettingsButtonTooltip", "Open Smart Asset Creator settings."))
+					.OnClicked(this, &SSmartAssetCreateWindow::HandleOpenSettingsClicked)
+					[
+						SNew(SImage)
+						.Image(FAppStyle::GetBrush("Icons.Settings"))
+					]
+				]
 			]
 
 			+ SVerticalBox::Slot()
@@ -114,7 +187,7 @@ void SSmartAssetCreateWindow::Construct(const FArguments& InArgs)
 			.AutoHeight()
 			.Padding(0.0f, 6.0f)
 			[
-				BuildAssetTypePicker()
+				BuildCreationOptionPicker()
 			]
 
 			+ SVerticalBox::Slot()
@@ -151,48 +224,80 @@ void SSmartAssetCreateWindow::Construct(const FArguments& InArgs)
 	];
 
 	RefreshClassViewer();
+	EnsureWindowSizeForCurrentOption();
 }
 
-TSharedRef<SWidget> SSmartAssetCreateWindow::BuildAssetTypePicker()
+void SSmartAssetCreateWindow::AddReferencedObjects(FReferenceCollector& Collector)
+{
+	Collector.AddReferencedObject(InitialParentBlueprint);
+	Collector.AddReferencedObject(SelectedParentClass);
+	Collector.AddReferencedObject(SelectedRowStruct);
+	Collector.AddReferencedObject(SelectedSkeleton);
+	Collector.AddReferencedObject(SelectedParentMaterial);
+
+	for (const TSharedPtr<FSmartCreationOption>& Option : CreationOptions)
+	{
+		if (Option.IsValid())
+		{
+			Collector.AddReferencedObject(Option->ParentClass);
+		}
+	}
+}
+
+void SSmartAssetCreateWindow::UnbindModuleCallbacks()
+{
+	OnCreateRequested.Unbind();
+	OnPreviewRequested.Unbind();
+	OnValidationRequested.Unbind();
+	OnOpenSettingsRequested.Unbind();
+}
+
+FString SSmartAssetCreateWindow::GetReferencerName() const
+{
+	return TEXT("SSmartAssetCreateWindow");
+}
+
+TSharedRef<SWidget> SSmartAssetCreateWindow::BuildCreationOptionPicker()
 {
 	return SNew(SVerticalBox)
 		+ SVerticalBox::Slot()
 		.AutoHeight()
 		[
 			SNew(STextBlock)
-			.Text(NSLOCTEXT("SmartAssetCreator", "AssetTypeLabel", "Asset Type"))
+			.Text(NSLOCTEXT("SmartAssetCreator", "CreationOptionLabel", "Creation Template"))
 		]
 		+ SVerticalBox::Slot()
 		.AutoHeight()
 		.Padding(0.0f, 4.0f, 0.0f, 0.0f)
 		[
-			SNew(SComboBox<TSharedPtr<FSmartAssetTypeOption>>)
-			.OptionsSource(&AssetTypeOptions)
-			.IsEnabled(!bLockAssetType)
-			.OnGenerateWidget_Lambda([](TSharedPtr<FSmartAssetTypeOption> Item)
+			SAssignNew(CreationOptionComboBox, SComboBox<TSharedPtr<FSmartCreationOption>>)
+			.OptionsSource(&CreationOptions)
+			.IsEnabled(!bLockCreationOption)
+			.OnGenerateWidget_Lambda([](TSharedPtr<FSmartCreationOption> Item)
 			{
-				return SNew(STextBlock).Text(Item.IsValid() ? Item->Label : FText::GetEmpty());
+				return SNew(STextBlock).Text(Item.IsValid() ? Item->DisplayName : FText::GetEmpty());
 			})
-			.OnSelectionChanged_Lambda([this](TSharedPtr<FSmartAssetTypeOption> Item, ESelectInfo::Type)
+			.OnSelectionChanged_Lambda([this](TSharedPtr<FSmartCreationOption> Item, ESelectInfo::Type)
 			{
 				if (Item.IsValid())
 				{
-					SelectedAssetTypeOption = Item;
-					SelectedAssetType = Item->AssetType;
+					SelectedCreationOption = Item;
 					SelectedParentClass = nullptr;
 					SelectedRowStruct = nullptr;
 					SelectedSkeleton = nullptr;
 					SelectedParentMaterial = nullptr;
 					bTemplateAnimBlueprint = false;
-					RefreshDefaultsForAssetType();
+					RefreshDefaultsForCreationOption();
+					EnsureWindowSizeForCurrentOption();
+					InvalidatePreview();
 				}
 			})
-			.InitiallySelectedItem(SelectedAssetTypeOption)
+			.InitiallySelectedItem(SelectedCreationOption)
 			[
 				SNew(STextBlock)
 				.Text_Lambda([this]()
 				{
-					return SelectedAssetTypeOption.IsValid() ? SelectedAssetTypeOption->Label : GetAssetTypeText(SelectedAssetType);
+					return SelectedCreationOptionDisplayName;
 				})
 			]
 		];
@@ -200,36 +305,31 @@ TSharedRef<SWidget> SSmartAssetCreateWindow::BuildAssetTypePicker()
 
 TSharedRef<SWidget> SSmartAssetCreateWindow::BuildDynamicOptions()
 {
-	return SNew(SVerticalBox)
-		+ SVerticalBox::Slot()
-		.AutoHeight()
-		[
-			SNew(STextBlock)
-			.Text_Lambda([this]()
-			{
-				return InitialParentBlueprint
-					? FText::FromString(FString::Printf(TEXT("Source Blueprint: %s"), *InitialParentBlueprint->GetName()))
-					: FText::GetEmpty();
-			})
-		]
-		+ SVerticalBox::Slot()
-		.AutoHeight()
-		.Padding(0.0f, 6.0f, 0.0f, 0.0f)
+	return SNew(SScrollBox)
+		+ SScrollBox::Slot()
 		[
 			SNew(SVerticalBox)
 
 			+ SVerticalBox::Slot()
 			.AutoHeight()
 			[
+				SNew(STextBlock)
+				.Text_Lambda([this]()
+				{
+					return InitialParentBlueprint
+						? FText::FromString(FString::Printf(TEXT("Source Blueprint: %s"), *InitialParentBlueprint->GetName()))
+						: FText::GetEmpty();
+				})
+			]
+
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0.0f, 6.0f, 0.0f, 0.0f)
+			[
 				SNew(SBox)
 				.Visibility_Lambda([this]()
 				{
-					return (SelectedAssetType == ESmartAssetType::ActorBlueprint
-						|| SelectedAssetType == ESmartAssetType::WidgetBlueprint
-						|| SelectedAssetType == ESmartAssetType::AnimBlueprint
-						|| SelectedAssetType == ESmartAssetType::DataAsset)
-						? EVisibility::Visible
-						: EVisibility::Collapsed;
+					return NeedsParentClass() ? EVisibility::Visible : EVisibility::Collapsed;
 				})
 				[
 					BuildClassPicker(
@@ -245,7 +345,9 @@ TSharedRef<SWidget> SSmartAssetCreateWindow::BuildDynamicOptions()
 				SNew(SBox)
 				.Visibility_Lambda([this]()
 				{
-					return SelectedAssetType == ESmartAssetType::AnimBlueprint ? EVisibility::Visible : EVisibility::Collapsed;
+					return IsAnimBlueprintOption() && !InitialParentBlueprint
+						? EVisibility::Visible
+						: EVisibility::Collapsed;
 				})
 				[
 					SNew(SVerticalBox)
@@ -256,7 +358,11 @@ TSharedRef<SWidget> SSmartAssetCreateWindow::BuildDynamicOptions()
 							NSLOCTEXT("SmartAssetCreator", "SkeletonLabel", "Target Skeleton"),
 							USkeleton::StaticClass(),
 							[this]() { return SelectedSkeleton ? SelectedSkeleton->GetPathName() : FString(); },
-							[this](const FAssetData& AssetData) { SelectedSkeleton = Cast<USkeleton>(AssetData.GetAsset()); })
+								[this](const FAssetData& AssetData)
+								{
+									SelectedSkeleton = Cast<USkeleton>(AssetData.GetAsset());
+									InvalidatePreview();
+								})
 					]
 					+ SVerticalBox::Slot()
 					.AutoHeight()
@@ -264,7 +370,11 @@ TSharedRef<SWidget> SSmartAssetCreateWindow::BuildDynamicOptions()
 					[
 						SNew(SCheckBox)
 						.IsChecked_Lambda([this]() { return bTemplateAnimBlueprint ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; })
-						.OnCheckStateChanged_Lambda([this](ECheckBoxState NewState) { bTemplateAnimBlueprint = NewState == ECheckBoxState::Checked; })
+							.OnCheckStateChanged_Lambda([this](ECheckBoxState NewState)
+							{
+								bTemplateAnimBlueprint = NewState == ECheckBoxState::Checked;
+								InvalidatePreview();
+							})
 						[
 							SNew(STextBlock)
 							.Text(NSLOCTEXT("SmartAssetCreator", "TemplateAnimBlueprint", "Create as template Anim"))
@@ -280,7 +390,7 @@ TSharedRef<SWidget> SSmartAssetCreateWindow::BuildDynamicOptions()
 				SNew(SBox)
 				.Visibility_Lambda([this]()
 				{
-					return SelectedAssetType == ESmartAssetType::DataTable ? EVisibility::Visible : EVisibility::Collapsed;
+					return IsDataTableOption() ? EVisibility::Visible : EVisibility::Collapsed;
 				})
 				[
 					BuildDataTableStructPicker()
@@ -294,14 +404,18 @@ TSharedRef<SWidget> SSmartAssetCreateWindow::BuildDynamicOptions()
 				SNew(SBox)
 				.Visibility_Lambda([this]()
 				{
-					return SelectedAssetType == ESmartAssetType::MaterialInstance ? EVisibility::Visible : EVisibility::Collapsed;
+					return IsMaterialInstanceOption() ? EVisibility::Visible : EVisibility::Collapsed;
 				})
 				[
 					BuildObjectPicker(
 						NSLOCTEXT("SmartAssetCreator", "ParentMaterialLabel", "Parent Material"),
 						UMaterialInterface::StaticClass(),
 						[this]() { return SelectedParentMaterial ? SelectedParentMaterial->GetPathName() : FString(); },
-						[this](const FAssetData& AssetData) { SelectedParentMaterial = Cast<UMaterialInterface>(AssetData.GetAsset()); })
+							[this](const FAssetData& AssetData)
+							{
+								SelectedParentMaterial = Cast<UMaterialInterface>(AssetData.GetAsset());
+								InvalidatePreview();
+							})
 				]
 			]
 		];
@@ -313,9 +427,17 @@ TSharedRef<SWidget> SSmartAssetCreateWindow::BuildFooter()
 		.SlotPadding(FMargin(6.0f, 0.0f))
 		+ SUniformGridPanel::Slot(0, 0)
 		[
-			SNew(SButton)
-			.Text(NSLOCTEXT("SmartAssetCreator", "CreateButton", "Create"))
-			.OnClicked(this, &SSmartAssetCreateWindow::HandleCreateClicked)
+				SNew(SButton)
+				.Text(NSLOCTEXT("SmartAssetCreator", "CreateButton", "Create"))
+				.IsEnabled_Lambda([this]() { return CanCreate(); })
+				.ToolTipText_Lambda([this]()
+				{
+					const FString ValidationError = GetValidationError();
+					return ValidationError.IsEmpty()
+						? NSLOCTEXT("SmartAssetCreator", "CreateButtonTooltip", "Create the selected asset.")
+						: FText::FromString(ValidationError);
+				})
+				.OnClicked(this, &SSmartAssetCreateWindow::HandleCreateClicked)
 		]
 		+ SUniformGridPanel::Slot(1, 0)
 		[
@@ -363,6 +485,11 @@ TSharedRef<SWidget> SSmartAssetCreateWindow::BuildObjectPicker(const FText& Labe
 
 TSharedRef<SWidget> SSmartAssetCreateWindow::BuildDataTableStructPicker()
 {
+	FStructViewerInitializationOptions Options;
+	Options.Mode = EStructViewerMode::StructPicker;
+	Options.StructFilter = MakeShared<FSmartDataTableStructFilter>();
+
+	FStructViewerModule& StructViewerModule = FModuleManager::LoadModuleChecked<FStructViewerModule>("StructViewer");
 	return SNew(SVerticalBox)
 		+ SVerticalBox::Slot()
 		.AutoHeight()
@@ -373,112 +500,151 @@ TSharedRef<SWidget> SSmartAssetCreateWindow::BuildDataTableStructPicker()
 		+ SVerticalBox::Slot()
 		.AutoHeight()
 		.Padding(0.0f, 4.0f, 0.0f, 0.0f)
-		[
-			SNew(SComboBox<TSharedPtr<UScriptStruct*>>)
-			.OptionsSource(&RowStructOptions)
-			.OnGenerateWidget_Lambda([](TSharedPtr<UScriptStruct*> Item)
-			{
-				return SNew(STextBlock).Text(FText::FromString((*Item)->GetName()));
-			})
-			.OnSelectionChanged_Lambda([this](TSharedPtr<UScriptStruct*> Item, ESelectInfo::Type)
-			{
-				SelectedRowStruct = Item.IsValid() ? *Item.Get() : nullptr;
-			})
 			[
-				SNew(STextBlock)
-				.Text_Lambda([this]()
-				{
-					return SelectedRowStruct
-						? FText::FromString(SelectedRowStruct->GetName())
-						: NSLOCTEXT("SmartAssetCreator", "PickRowStruct", "Pick Row Struct...");
-				})
-			]
-		];
+				SNew(SBox)
+				.HeightOverride(260.0f)
+				[
+					StructViewerModule.CreateStructViewer(
+						Options,
+						FOnStructPicked::CreateLambda([this](const UScriptStruct* PickedStruct)
+						{
+								SelectedRowStruct = const_cast<UScriptStruct*>(PickedStruct);
+								InvalidatePreview();
+						}))
+				]
+			];
 }
 
-void SSmartAssetCreateWindow::RebuildAssetTypeOptions()
+void SSmartAssetCreateWindow::RebuildCreationOptions()
 {
-	AssetTypeOptions.Reset();
+	CreationOptions.Reset();
+	SelectedCreationOption.Reset();
 
-	auto AddBuiltInOption = [this](ESmartAssetType AssetType)
+	for (const FSmartCreationOption& Option : CreationOptionBuilder.BuildOptions())
 	{
-		TSharedPtr<FSmartAssetTypeOption> Option = MakeShared<FSmartAssetTypeOption>();
-		Option->AssetType = AssetType;
-		Option->Label = GetAssetTypeText(AssetType);
-		AssetTypeOptions.Add(Option);
-		if (!SelectedAssetTypeOption.IsValid() && SelectedAssetType == AssetType)
+			if (InitialParentBlueprint
+				&& (!InitialParentBlueprint->GeneratedClass
+					|| Option.UnderlyingKind != ESmartUnderlyingAssetKind::Blueprint
+					|| !FSmartCreationOptionBuilder::DoesOptionMatchClass(Option, InitialParentBlueprint->GeneratedClass)))
 		{
-			SelectedAssetTypeOption = Option;
+			continue;
 		}
-	};
 
-	AddBuiltInOption(ESmartAssetType::ActorBlueprint);
-	AddBuiltInOption(ESmartAssetType::WidgetBlueprint);
-	AddBuiltInOption(ESmartAssetType::AnimBlueprint);
-	AddBuiltInOption(ESmartAssetType::InterfaceBlueprint);
-	AddBuiltInOption(ESmartAssetType::DataAsset);
-	AddBuiltInOption(ESmartAssetType::DataTable);
-	AddBuiltInOption(ESmartAssetType::Material);
-	AddBuiltInOption(ESmartAssetType::MaterialInstance);
-
-	const USmartAssetSettings* Settings = GetDefault<USmartAssetSettings>();
-	if (Settings)
-	{
-		TArray<TSharedPtr<FSmartAssetTypeOption>> CustomOptions;
-		for (const FSmartAssetPrefixRule& Rule : Settings->PrefixRules)
+		TSharedPtr<FSmartCreationOption> SharedOption = MakeShared<FSmartCreationOption>(Option);
+		CreationOptions.Add(SharedOption);
+		if (!InitialParentBlueprint && !SelectedCreationOption.IsValid() && Option.UnderlyingKind == InitialUnderlyingKind)
 		{
-			if (!Rule.bEnabled)
+			SelectedCreationOption = SharedOption;
+		}
+	}
+
+	if (InitialParentBlueprint && InitialParentBlueprint->GeneratedClass)
+	{
+		int32 BestDistance = TNumericLimits<int32>::Max();
+		for (const TSharedPtr<FSmartCreationOption>& Option : CreationOptions)
+		{
+			if (!Option.IsValid() || Option->UnderlyingKind != ESmartUnderlyingAssetKind::Blueprint || !Option->ParentClass)
 			{
 				continue;
 			}
 
-			UClass* RuleClass = Rule.BaseClass.TryLoadClass<UObject>();
-			if (!RuleClass || IsBuiltInClassRule(RuleClass))
+			const int32 Distance = ComputeClassDistance(InitialParentBlueprint->GeneratedClass, Option->ParentClass);
+			if (Distance != INDEX_NONE && Distance < BestDistance)
 			{
-				continue;
+				BestDistance = Distance;
+				SelectedCreationOption = Option;
 			}
-
-			TSharedPtr<FSmartAssetTypeOption> Option = MakeShared<FSmartAssetTypeOption>();
-			Option->AssetType = ResolveAssetTypeForClass(RuleClass);
-			Option->Label = MakeClassOptionLabel(RuleClass);
-			Option->PresetClass = RuleClass;
-			CustomOptions.Add(Option);
 		}
+	}
 
-		CustomOptions.Sort([](const TSharedPtr<FSmartAssetTypeOption>& A, const TSharedPtr<FSmartAssetTypeOption>& B)
+	if (!SelectedCreationOption.IsValid() && CreationOptions.Num() > 0)
+	{
+		SelectedCreationOption = CreationOptions[0];
+	}
+}
+
+void SSmartAssetCreateWindow::RefreshForSettingsChange()
+{
+	const TSharedPtr<FSmartCreationOption> PreviousOption = SelectedCreationOption;
+	UClass* PreviousParentClass = SelectedParentClass;
+
+	CreationOptionBuilder.ResetCache();
+	FSmartAssetRuleResolver::LoadConfiguredRuleClasses();
+	RebuildCreationOptions();
+
+	if (PreviousOption.IsValid())
+	{
+		const TSharedPtr<FSmartCreationOption>* ExactMatch = CreationOptions.FindByPredicate([&PreviousOption](const TSharedPtr<FSmartCreationOption>& Option)
 		{
-			return A.IsValid() && B.IsValid() ? A->Label.ToString() < B->Label.ToString() : false;
+			return Option.IsValid()
+				&& Option->UnderlyingKind == PreviousOption->UnderlyingKind
+				&& Option->BlueprintTemplateKind == PreviousOption->BlueprintTemplateKind
+				&& Option->ParentClass == PreviousOption->ParentClass
+				&& Option->Prefix == PreviousOption->Prefix
+				&& Option->bIsUserDefined == PreviousOption->bIsUserDefined
+				&& Option->bAllowDerivedClasses == PreviousOption->bAllowDerivedClasses;
+		});
+		const TSharedPtr<FSmartCreationOption>* StructuralMatch = ExactMatch ? nullptr : CreationOptions.FindByPredicate([&PreviousOption](const TSharedPtr<FSmartCreationOption>& Option)
+		{
+			return Option.IsValid()
+				&& Option->UnderlyingKind == PreviousOption->UnderlyingKind
+				&& Option->BlueprintTemplateKind == PreviousOption->BlueprintTemplateKind
+				&& Option->ParentClass == PreviousOption->ParentClass
+				&& Option->bIsUserDefined == PreviousOption->bIsUserDefined
+				&& Option->bAllowDerivedClasses == PreviousOption->bAllowDerivedClasses;
 		});
 
-		AssetTypeOptions.Append(CustomOptions);
+		if (ExactMatch)
+		{
+			SelectedCreationOption = *ExactMatch;
+		}
+		else if (StructuralMatch)
+		{
+			SelectedCreationOption = *StructuralMatch;
+		}
 	}
 
-	if (!SelectedAssetTypeOption.IsValid() && AssetTypeOptions.Num() > 0)
+	if (PreviousParentClass
+		&& SelectedCreationOption.IsValid()
+		&& FSmartCreationOptionBuilder::DoesOptionMatchClass(*SelectedCreationOption, PreviousParentClass))
 	{
-		SelectedAssetTypeOption = AssetTypeOptions[0];
-		SelectedAssetType = SelectedAssetTypeOption->AssetType;
+		SelectedParentClass = PreviousParentClass;
 	}
+	else
+	{
+		RefreshDefaultsForCreationOption();
+	}
+
+	if (CreationOptionComboBox.IsValid())
+	{
+		CreationOptionComboBox->RefreshOptions();
+		CreationOptionComboBox->SetSelectedItem(SelectedCreationOption);
+	}
+
+	RefreshClassViewer();
+	EnsureWindowSizeForCurrentOption();
+	InvalidatePreview();
 }
 
-void SSmartAssetCreateWindow::RefreshDefaultsForAssetType()
+void SSmartAssetCreateWindow::RefreshDefaultsForCreationOption()
 {
 	if (InitialParentBlueprint)
 	{
 		SelectedParentClass = InitialParentBlueprint->GeneratedClass;
+		if (const UAnimBlueprint* ParentAnimBlueprint = Cast<UAnimBlueprint>(InitialParentBlueprint.Get()))
+		{
+			SelectedSkeleton = ParentAnimBlueprint->TargetSkeleton;
+			bTemplateAnimBlueprint = ParentAnimBlueprint->bIsTemplate;
+		}
 		RefreshClassViewer();
 		return;
 	}
 
-	if (SelectedAssetTypeOption.IsValid() && SelectedAssetTypeOption->PresetClass.IsValid())
+	if (SelectedCreationOption.IsValid() && SelectedCreationOption->ParentClass)
 	{
-		SelectedParentClass = SelectedAssetTypeOption->PresetClass.Get();
+		SelectedParentClass = SelectedCreationOption->ParentClass;
 		RefreshClassViewer();
 		return;
-	}
-
-	if (OnDefaultClassRequested.IsBound())
-	{
-		SelectedParentClass = OnDefaultClassRequested.Execute(SelectedAssetType);
 	}
 
 	RefreshClassViewer();
@@ -492,9 +658,57 @@ void SSmartAssetCreateWindow::RefreshClassViewer()
 	}
 }
 
+void SSmartAssetCreateWindow::EnsureWindowSizeForCurrentOption() const
+{
+	const FVector2D TargetSize = IsAnimBlueprintOption()
+		? FVector2D(620.0f, 650.0f)
+		: FVector2D(620.0f, 520.0f);
+
+	const TSharedPtr<SWindow> ParentWindow = ParentWindowWeak.Pin();
+	if (!ParentWindow.IsValid())
+	{
+		return;
+	}
+
+	const FVector2D CurrentSize = ParentWindow->GetSizeInScreen();
+	if (!CurrentSize.Equals(TargetSize, KINDA_SMALL_NUMBER))
+	{
+		ParentWindow->Resize(TargetSize);
+	}
+}
+
+void SSmartAssetCreateWindow::InvalidatePreview()
+{
+	bPreviewDirty = true;
+	if (!SelectedCreationOption.IsValid())
+	{
+		SelectedCreationOptionDisplayName = FText::GetEmpty();
+		return;
+	}
+
+	SelectedCreationOptionDisplayName = FSmartCreationOptionBuilder::MakeEffectiveDisplayName(*SelectedCreationOption, BuildRequest());
+}
+
 FString SSmartAssetCreateWindow::GetPreviewText() const
 {
-	return OnPreviewRequested.IsBound() ? OnPreviewRequested.Execute(BuildRequest()) : FString();
+	const double CurrentTime = FPlatformTime::Seconds();
+	if (bPreviewDirty || CurrentTime - CachedPreviewTime >= 0.5)
+	{
+		CachedPreviewText = OnPreviewRequested.IsBound() ? OnPreviewRequested.Execute(BuildRequest()) : FString();
+		bPreviewDirty = false;
+		CachedPreviewTime = CurrentTime;
+	}
+	return CachedPreviewText;
+}
+
+FString SSmartAssetCreateWindow::GetValidationError() const
+{
+	return OnValidationRequested.IsBound() ? OnValidationRequested.Execute(BuildRequest()) : FString();
+}
+
+bool SSmartAssetCreateWindow::CanCreate() const
+{
+	return OnCreateRequested.IsBound() && GetValidationError().IsEmpty();
 }
 
 FReply SSmartAssetCreateWindow::HandleCreateClicked()
@@ -509,6 +723,13 @@ FReply SSmartAssetCreateWindow::HandleCreateClicked()
 	{
 		CloseWindow();
 	}
+	else
+	{
+		const FText Message = Result.ErrorMessage.IsEmpty()
+			? NSLOCTEXT("SmartAssetCreator", "UnknownCreateFailure", "The asset could not be created.")
+			: FText::FromString(Result.ErrorMessage);
+		FMessageDialog::Open(EAppMsgType::Ok, Message, NSLOCTEXT("SmartAssetCreator", "CreateFailureTitle", "Smart Asset Creation Failed"));
+	}
 
 	return FReply::Handled();
 }
@@ -516,6 +737,15 @@ FReply SSmartAssetCreateWindow::HandleCreateClicked()
 FReply SSmartAssetCreateWindow::HandleCancelClicked()
 {
 	CloseWindow();
+	return FReply::Handled();
+}
+
+FReply SSmartAssetCreateWindow::HandleOpenSettingsClicked()
+{
+	if (OnOpenSettingsRequested.IsBound())
+	{
+		OnOpenSettingsRequested.Execute();
+	}
 	return FReply::Handled();
 }
 
@@ -527,118 +757,46 @@ void SSmartAssetCreateWindow::CloseWindow()
 	}
 }
 
-FText SSmartAssetCreateWindow::GetAssetTypeText(ESmartAssetType AssetType) const
+bool SSmartAssetCreateWindow::NeedsParentClass() const
 {
-	switch (AssetType)
-	{
-	case ESmartAssetType::ActorBlueprint:
-		return NSLOCTEXT("SmartAssetCreator", "ActorBlueprintType", "Object");
-	case ESmartAssetType::WidgetBlueprint:
-		return NSLOCTEXT("SmartAssetCreator", "WidgetBlueprintType", "Widget");
-	case ESmartAssetType::AnimBlueprint:
-		return NSLOCTEXT("SmartAssetCreator", "AnimBlueprintType", "Anim");
-	case ESmartAssetType::InterfaceBlueprint:
-		return NSLOCTEXT("SmartAssetCreator", "InterfaceBlueprintType", "Interface");
-	case ESmartAssetType::DataAsset:
-		return NSLOCTEXT("SmartAssetCreator", "DataAssetType", "Data Asset");
-	case ESmartAssetType::DataTable:
-		return NSLOCTEXT("SmartAssetCreator", "DataTableType", "Data Table");
-	case ESmartAssetType::Material:
-		return NSLOCTEXT("SmartAssetCreator", "MaterialType", "Material");
-	case ESmartAssetType::MaterialInstance:
-		return NSLOCTEXT("SmartAssetCreator", "MaterialInstanceType", "Material Instance");
-	default:
-		return FText::GetEmpty();
-	}
+	return !InitialParentBlueprint
+		&& SelectedCreationOption.IsValid()
+		&& (SelectedCreationOption->UnderlyingKind == ESmartUnderlyingAssetKind::Blueprint
+			|| SelectedCreationOption->UnderlyingKind == ESmartUnderlyingAssetKind::DataAsset)
+		&& SelectedCreationOption->BlueprintTemplateKind != ESmartBlueprintTemplateKind::Interface;
 }
 
-ESmartAssetType SSmartAssetCreateWindow::ResolveAssetTypeForClass(const UClass* InClass) const
+bool SSmartAssetCreateWindow::IsAnimBlueprintOption() const
 {
-	if (!InClass)
-	{
-		return ESmartAssetType::ActorBlueprint;
-	}
-
-	if (InClass->IsChildOf(UUserWidget::StaticClass()))
-	{
-		return ESmartAssetType::WidgetBlueprint;
-	}
-
-	if (InClass->IsChildOf(UAnimInstance::StaticClass()))
-	{
-		return ESmartAssetType::AnimBlueprint;
-	}
-
-	if (InClass->IsChildOf(UDataAsset::StaticClass()))
-	{
-		return ESmartAssetType::DataAsset;
-	}
-
-	if (InClass->IsChildOf(UInterface::StaticClass()))
-	{
-		return ESmartAssetType::InterfaceBlueprint;
-	}
-
-	return ESmartAssetType::ActorBlueprint;
+	return SelectedCreationOption.IsValid()
+		&& SelectedCreationOption->UnderlyingKind == ESmartUnderlyingAssetKind::Blueprint
+		&& SelectedCreationOption->BlueprintTemplateKind == ESmartBlueprintTemplateKind::Anim;
 }
 
-FText SSmartAssetCreateWindow::MakeClassOptionLabel(const UClass* InClass) const
+bool SSmartAssetCreateWindow::IsDataTableOption() const
 {
-	if (!InClass)
-	{
-		return FText::GetEmpty();
-	}
-
-	const FText DisplayName = InClass->GetDisplayNameText();
-	if (!DisplayName.IsEmpty())
-	{
-		return DisplayName;
-	}
-
-	FString ClassName = InClass->GetName();
-	if (ClassName.EndsWith(TEXT("_C")))
-	{
-		ClassName.LeftChopInline(2, EAllowShrinking::No);
-	}
-
-	return FText::FromString(ClassName);
+	return SelectedCreationOption.IsValid()
+		&& SelectedCreationOption->UnderlyingKind == ESmartUnderlyingAssetKind::DataTable;
 }
 
-bool SSmartAssetCreateWindow::IsBuiltInClassRule(const UClass* InClass) const
+bool SSmartAssetCreateWindow::IsMaterialInstanceOption() const
 {
-	return InClass == UObject::StaticClass()
-		|| InClass == UUserWidget::StaticClass()
-		|| InClass == UAnimInstance::StaticClass()
-		|| InClass == UInterface::StaticClass()
-		|| InClass == UDataAsset::StaticClass();
-}
-
-TArray<UScriptStruct*> SSmartAssetCreateWindow::GetAvailableRowStructs() const
-{
-	TArray<UScriptStruct*> Structs;
-	for (TObjectIterator<UScriptStruct> It; It; ++It)
-	{
-		UScriptStruct* Struct = *It;
-		if (Struct
-			&& Struct->IsChildOf(FTableRowBase::StaticStruct())
-			&& !Struct->HasMetaData(TEXT("Hidden")))
-		{
-			Structs.Add(Struct);
-		}
-	}
-
-	Structs.Sort([](const UScriptStruct& A, const UScriptStruct& B)
-	{
-		return A.GetName() < B.GetName();
-	});
-
-	return Structs;
+	return SelectedCreationOption.IsValid()
+		&& SelectedCreationOption->UnderlyingKind == ESmartUnderlyingAssetKind::MaterialInstance;
 }
 
 FSmartAssetCreateRequest SSmartAssetCreateWindow::BuildRequest() const
 {
 	FSmartAssetCreateRequest Request;
-	Request.AssetType = SelectedAssetType;
+	if (SelectedCreationOption.IsValid())
+	{
+		Request.UnderlyingKind = SelectedCreationOption->UnderlyingKind;
+		Request.BlueprintTemplateKind = SelectedCreationOption->BlueprintTemplateKind;
+		Request.bHasPrefixOverride = SelectedCreationOption->bIsUserDefined;
+		Request.PrefixOverride = SelectedCreationOption->Prefix;
+		Request.bHasPrefixFallback = true;
+		Request.PrefixFallback = SelectedCreationOption->Prefix;
+	}
 	Request.TargetFolder = TargetFolder;
 	Request.ParentClass = SelectedParentClass;
 	Request.ParentBlueprint = InitialParentBlueprint;
@@ -651,20 +809,19 @@ FSmartAssetCreateRequest SSmartAssetCreateWindow::BuildRequest() const
 
 UClass* SSmartAssetCreateWindow::GetRequiredBaseClassForSelection() const
 {
-	if (SelectedAssetTypeOption.IsValid() && SelectedAssetTypeOption->PresetClass.IsValid())
+	if (SelectedCreationOption.IsValid() && SelectedCreationOption->ParentClass)
 	{
-		return SelectedAssetTypeOption->PresetClass.Get();
+		return SelectedCreationOption->ParentClass;
 	}
 
-	switch (SelectedAssetType)
+	if (!SelectedCreationOption.IsValid())
 	{
-	case ESmartAssetType::ActorBlueprint:
 		return UObject::StaticClass();
-	case ESmartAssetType::WidgetBlueprint:
-		return UUserWidget::StaticClass();
-	case ESmartAssetType::AnimBlueprint:
-		return UAnimInstance::StaticClass();
-	case ESmartAssetType::DataAsset:
+	}
+
+	switch (SelectedCreationOption->UnderlyingKind)
+	{
+	case ESmartUnderlyingAssetKind::DataAsset:
 		return UDataAsset::StaticClass();
 	default:
 		return UObject::StaticClass();
@@ -679,11 +836,14 @@ TSharedRef<SWidget> SSmartAssetCreateWindow::CreateClassViewerWidget()
 	Options.bShowNoneOption = false;
 	Options.bExpandRootNodes = true;
 	Options.bExpandAllNodes = false;
-	Options.bShowObjectRootClass = SelectedAssetType == ESmartAssetType::ActorBlueprint;
+	Options.bShowObjectRootClass = SelectedCreationOption.IsValid()
+		&& SelectedCreationOption->UnderlyingKind == ESmartUnderlyingAssetKind::Blueprint
+		&& GetRequiredBaseClassForSelection() == UObject::StaticClass();
 	Options.bAllowViewOptions = false;
 	Options.InitiallySelectedClass = SelectedParentClass.Get();
 
-	TSharedPtr<FSmartAssetClassFilter> Filter = MakeShared<FSmartAssetClassFilter>(GetRequiredBaseClassForSelection());
+	const bool bAllowDerivedClasses = !SelectedCreationOption.IsValid() || SelectedCreationOption->bAllowDerivedClasses;
+	TSharedPtr<FSmartAssetClassFilter> Filter = MakeShared<FSmartAssetClassFilter>(GetRequiredBaseClassForSelection(), bAllowDerivedClasses);
 	Options.ClassFilters.Add(Filter.ToSharedRef());
 
 	FClassViewerModule& ClassViewerModule = FModuleManager::LoadModuleChecked<FClassViewerModule>("ClassViewer");
@@ -691,7 +851,8 @@ TSharedRef<SWidget> SSmartAssetCreateWindow::CreateClassViewerWidget()
 		Options,
 		FOnClassPicked::CreateLambda([this](UClass* PickedClass)
 		{
-			SelectedParentClass = PickedClass;
+				SelectedParentClass = PickedClass;
+				InvalidatePreview();
 		})
 	);
 }

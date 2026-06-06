@@ -50,25 +50,57 @@ const USmartAssetSettings* FSmartAssetRuleResolver::GetSettings()
 	return GetDefault<USmartAssetSettings>();
 }
 
-FString FSmartAssetRuleResolver::ResolvePrefix(const FSmartAssetCreateRequest& Request)
+void FSmartAssetRuleResolver::LoadConfiguredRuleClasses()
 {
 	const USmartAssetSettings* Settings = GetSettings();
-	UClass* RuleCandidateClass = ResolveRuleClassCandidate(Request);
-	const bool bUsesClassRules = UsesClassRules(Request.AssetType);
-
-	if (bUsesClassRules && RuleCandidateClass && Settings)
+	if (!Settings)
 	{
-		int32 BestDistance = TNumericLimits<int32>::Max();
-		const FSmartAssetPrefixRule* BestRule = nullptr;
+		return;
+	}
 
+	for (const FSmartAssetPrefixRule& Rule : Settings->PrefixRules)
+	{
+		if (Rule.bEnabled && !Rule.BaseClass.IsNull())
+		{
+			Rule.BaseClass.TryLoadClass<UObject>();
+		}
+	}
+}
+
+FString FSmartAssetRuleResolver::ResolvePrefix(const FSmartAssetCreateRequest& Request)
+{
+	if (Request.bHasPrefixOverride)
+	{
+		return Request.PrefixOverride;
+	}
+
+	const FString FallbackPrefix = Request.bHasPrefixFallback ? Request.PrefixFallback : ResolveBuiltInPrefix(Request);
+	if ((Request.UnderlyingKind == ESmartUnderlyingAssetKind::Blueprint
+			|| Request.UnderlyingKind == ESmartUnderlyingAssetKind::DataAsset)
+		&& Request.ParentClass)
+	{
+		return ResolveClassPrefix(Request.ParentClass, FallbackPrefix);
+	}
+
+	return FallbackPrefix;
+}
+
+FString FSmartAssetRuleResolver::ResolveClassPrefix(const UClass* ParentClass, const FString& FallbackPrefix)
+{
+	const USmartAssetSettings* Settings = GetSettings();
+	int32 BestDistance = TNumericLimits<int32>::Max();
+	const FSmartAssetPrefixRule* BestRule = nullptr;
+
+	if (Settings && ParentClass)
+	{
 		for (const FSmartAssetPrefixRule& Rule : Settings->PrefixRules)
 		{
-			if (!Rule.bEnabled || Rule.Prefix.IsEmpty())
+			if (!Rule.bEnabled)
 			{
 				continue;
 			}
 
-			UClass* RuleClass = Rule.BaseClass.TryLoadClass<UObject>();
+			UClass* RuleClass = Rule.BaseClass.ResolveClass();
 			if (!RuleClass)
 			{
 				continue;
@@ -77,9 +109,17 @@ FString FSmartAssetRuleResolver::ResolvePrefix(const FSmartAssetCreateRequest& R
 			int32 Distance = INDEX_NONE;
 			if (Rule.bIncludeDerivedClasses)
 			{
-				Distance = ComputeInheritanceDistance(RuleCandidateClass, RuleClass);
+				int32 CandidateDistance = 0;
+				for (const UClass* Current = ParentClass; Current; Current = Current->GetSuperClass(), ++CandidateDistance)
+				{
+					if (Current == RuleClass)
+					{
+						Distance = CandidateDistance;
+						break;
+					}
+				}
 			}
-			else if (RuleCandidateClass == RuleClass)
+			else if (ParentClass == RuleClass)
 			{
 				Distance = 0;
 			}
@@ -90,14 +130,9 @@ FString FSmartAssetRuleResolver::ResolvePrefix(const FSmartAssetCreateRequest& R
 				BestRule = &Rule;
 			}
 		}
-
-		if (BestRule)
-		{
-			return BestRule->Prefix;
-		}
 	}
 
-	return bUsesClassRules ? FString() : ResolveBuiltInPrefix(Request);
+	return BestRule ? BestRule->Prefix : FallbackPrefix;
 }
 
 FString FSmartAssetRuleResolver::BuildAssetBaseName(const FSmartAssetCreateRequest& Request)
@@ -107,10 +142,7 @@ FString FSmartAssetRuleResolver::BuildAssetBaseName(const FSmartAssetCreateReque
 	const FString Stem = BuildNameStem(Request);
 
 	const bool bIsChildBlueprint = Request.ParentBlueprint != nullptr
-		&& (Request.AssetType == ESmartAssetType::ActorBlueprint
-			|| Request.AssetType == ESmartAssetType::WidgetBlueprint
-			|| Request.AssetType == ESmartAssetType::AnimBlueprint
-			|| Request.AssetType == ESmartAssetType::InterfaceBlueprint);
+		&& Request.UnderlyingKind == ESmartUnderlyingAssetKind::Blueprint;
 
 	if (bIsChildBlueprint && Settings && !Settings->ChildBlueprintSuffix.IsEmpty())
 	{
@@ -133,7 +165,7 @@ FString FSmartAssetRuleResolver::StripKnownPrefix(const FString& InName)
 
 		for (const FSmartAssetPrefixRule& Rule : Settings->PrefixRules)
 		{
-			if (!Rule.Prefix.IsEmpty())
+			if (Rule.bEnabled && !Rule.Prefix.IsEmpty())
 			{
 				Prefixes.Add(Rule.Prefix);
 			}
@@ -161,86 +193,17 @@ FString FSmartAssetRuleResolver::ResolveBuiltInPrefix(const FSmartAssetCreateReq
 	const USmartAssetSettings* Settings = GetSettings();
 	check(Settings);
 
-	switch (Request.AssetType)
+	switch (Request.UnderlyingKind)
 	{
-	case ESmartAssetType::DataTable:
+	case ESmartUnderlyingAssetKind::DataTable:
 		return Settings->DataTablePrefix;
-	case ESmartAssetType::Material:
+	case ESmartUnderlyingAssetKind::Material:
 		return Settings->MaterialPrefix;
-	case ESmartAssetType::MaterialInstance:
+	case ESmartUnderlyingAssetKind::MaterialInstance:
 		return Settings->MaterialInstancePrefix;
 	default:
 		return TEXT("AS_");
 	}
-}
-
-bool FSmartAssetRuleResolver::UsesClassRules(ESmartAssetType AssetType)
-{
-	switch (AssetType)
-	{
-	case ESmartAssetType::ActorBlueprint:
-	case ESmartAssetType::WidgetBlueprint:
-	case ESmartAssetType::AnimBlueprint:
-	case ESmartAssetType::InterfaceBlueprint:
-	case ESmartAssetType::DataAsset:
-		return true;
-	default:
-		return false;
-	}
-}
-
-UClass* FSmartAssetRuleResolver::ResolveRuleClassCandidate(const FSmartAssetCreateRequest& Request)
-{
-	if (Request.ParentBlueprint && Request.ParentBlueprint->GeneratedClass)
-	{
-		return Request.ParentBlueprint->GeneratedClass;
-	}
-
-	if (Request.ParentClass)
-	{
-		return Request.ParentClass;
-	}
-
-	switch (Request.AssetType)
-	{
-	case ESmartAssetType::ActorBlueprint:
-		return UObject::StaticClass();
-	case ESmartAssetType::WidgetBlueprint:
-		return UUserWidget::StaticClass();
-	case ESmartAssetType::AnimBlueprint:
-		return UAnimInstance::StaticClass();
-	case ESmartAssetType::InterfaceBlueprint:
-		return UInterface::StaticClass();
-	case ESmartAssetType::DataAsset:
-		return UDataAsset::StaticClass();
-	case ESmartAssetType::DataTable:
-		return UDataTable::StaticClass();
-	case ESmartAssetType::Material:
-		return UMaterial::StaticClass();
-	case ESmartAssetType::MaterialInstance:
-		return UMaterialInstanceConstant::StaticClass();
-	default:
-		return nullptr;
-	}
-}
-
-int32 FSmartAssetRuleResolver::ComputeInheritanceDistance(const UClass* ChildClass, const UClass* AncestorClass)
-{
-	if (!ChildClass || !AncestorClass)
-	{
-		return INDEX_NONE;
-	}
-
-	int32 Distance = 0;
-	for (const UClass* Current = ChildClass; Current; Current = Current->GetSuperClass(), ++Distance)
-	{
-		if (Current == AncestorClass)
-		{
-			return Distance;
-		}
-	}
-
-	return INDEX_NONE;
 }
 
 FString FSmartAssetRuleResolver::BuildNameStem(const FSmartAssetCreateRequest& Request)
@@ -253,19 +216,16 @@ FString FSmartAssetRuleResolver::BuildNameStem(const FSmartAssetCreateRequest& R
 		return Settings->bStripKnownPrefixFromParentBlueprintName ? StripKnownPrefix(RawName) : RawName;
 	}
 
-	switch (Request.AssetType)
+	switch (Request.UnderlyingKind)
 	{
-	case ESmartAssetType::ActorBlueprint:
-	case ESmartAssetType::WidgetBlueprint:
-	case ESmartAssetType::AnimBlueprint:
-	case ESmartAssetType::InterfaceBlueprint:
-	case ESmartAssetType::DataAsset:
+	case ESmartUnderlyingAssetKind::Blueprint:
+	case ESmartUnderlyingAssetKind::DataAsset:
 		return StripKnownPrefix(GetClassStem(Request.ParentClass));
-	case ESmartAssetType::DataTable:
+	case ESmartUnderlyingAssetKind::DataTable:
 		return StripKnownPrefix(GetStructStem(Request.RowStruct));
-	case ESmartAssetType::Material:
+	case ESmartUnderlyingAssetKind::Material:
 		return TEXT("Material");
-	case ESmartAssetType::MaterialInstance:
+	case ESmartUnderlyingAssetKind::MaterialInstance:
 		if (Request.ParentMaterial)
 		{
 			return StripKnownPrefix(Request.ParentMaterial->GetName());

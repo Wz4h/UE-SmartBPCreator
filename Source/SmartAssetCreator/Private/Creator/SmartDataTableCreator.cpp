@@ -1,20 +1,21 @@
 #include "Creator/SmartDataTableCreator.h"
 
 #include "AssetToolsModule.h"
+#include "DataTableEditorUtils.h"
 #include "Engine/DataTable.h"
 #include "Factories/DataTableFactory.h"
 
 bool FSmartDataTableCreator::CanCreate(const FSmartAssetCreateRequest& Request) const
 {
-	return Request.AssetType == ESmartAssetType::DataTable;
+	return Request.UnderlyingKind == ESmartUnderlyingAssetKind::DataTable;
 }
 
 FSmartAssetCreateResult FSmartDataTableCreator::Create(const FSmartAssetCreateRequest& Request, const FString& AssetName) const
 {
 	FSmartAssetCreateResult Result;
-	if (!Request.RowStruct)
+	if (!Request.RowStruct || !FDataTableEditorUtils::IsValidTableStruct(Request.RowStruct))
 	{
-		Result.ErrorMessage = TEXT("Data Table requires a row struct.");
+		Result.ErrorMessage = TEXT("Data Table requires a valid row struct.");
 		return Result;
 	}
 

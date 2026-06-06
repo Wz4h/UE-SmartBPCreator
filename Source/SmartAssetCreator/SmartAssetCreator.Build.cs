@@ -9,7 +9,12 @@ public class SmartAssetCreator : ModuleRules
 		PublicDependencyModuleNames.AddRange(
 			new string[]
 			{
-				"Core"
+				"Core",
+				"CoreUObject",
+				"DeveloperSettings",
+				"Engine",
+				"Slate",
+				"SlateCore"
 			}
 		);
 
@@ -21,14 +26,11 @@ public class SmartAssetCreator : ModuleRules
 				"ClassViewer",
 				"ContentBrowser",
 				"ContentBrowserData",
-				"CoreUObject",
-				"DeveloperSettings",
-				"Engine",
 				"InputCore",
 				"Projects",
 				"PropertyEditor",
-				"Slate",
-				"SlateCore",
+				"Settings",
+				"StructViewer",
 				"ToolMenus",
 				"UMG",
 				"UMGEditor",

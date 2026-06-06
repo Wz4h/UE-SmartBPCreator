@@ -9,7 +9,7 @@ public:
 	virtual FSmartAssetCreateResult Create(const FSmartAssetCreateRequest& Request, const FString& AssetName) const override;
 
 private:
-	FSmartAssetCreateResult CreateActorBlueprint(const FSmartAssetCreateRequest& Request, const FString& AssetName) const;
+	FSmartAssetCreateResult CreateClassBlueprint(const FSmartAssetCreateRequest& Request, const FString& AssetName) const;
 	FSmartAssetCreateResult CreateWidgetBlueprint(const FSmartAssetCreateRequest& Request, const FString& AssetName) const;
 	FSmartAssetCreateResult CreateAnimBlueprint(const FSmartAssetCreateRequest& Request, const FString& AssetName) const;
 	FSmartAssetCreateResult CreateInterfaceBlueprint(const FSmartAssetCreateRequest& Request, const FString& AssetName) const;

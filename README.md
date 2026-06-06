@@ -14,7 +14,7 @@ Unreal Engine editor plugin for creating common assets with automatic naming and
   - Data Table -> `DT_`
   - Material -> `M_`
   - Material Instance -> `MI_`
-- Create child assets from a selected Blueprint asset.
+- Create child assets from supported Blueprint assets. Interface and Function Library Blueprints are excluded.
 - Show a live name preview before creation.
 - Automatically select the new asset and enter rename mode.
 - Do not auto-open the created asset editor.
@@ -67,13 +67,13 @@ You can configure:
 Project plugin:
 
 ```text
-YourProject/Plugins/SmartBPCreator/
+YourProject/Plugins/SmartAssetCreator/
 ```
 
 Engine plugin:
 
 ```text
-UE_5.x/Engine/Plugins/Marketplace/SmartBPCreator/
+UE_5.x/Engine/Plugins/Marketplace/SmartAssetCreator/
 ```
 
 Then:

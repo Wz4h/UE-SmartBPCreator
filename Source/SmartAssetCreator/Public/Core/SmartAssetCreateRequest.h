@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Core/SmartCreationOption.h"
 #include "SmartAssetCreateRequest.generated.h"
 
 class UBlueprint;
@@ -8,26 +9,28 @@ class UMaterialInterface;
 class UScriptStruct;
 class USkeleton;
 
-UENUM()
-enum class ESmartAssetType : uint8
-{
-	ActorBlueprint,
-	WidgetBlueprint,
-	AnimBlueprint,
-	InterfaceBlueprint,
-	DataAsset,
-	DataTable,
-	Material,
-	MaterialInstance
-};
-
 USTRUCT()
 struct SMARTASSETCREATOR_API FSmartAssetCreateRequest
 {
 	GENERATED_BODY()
 
 	UPROPERTY()
-	ESmartAssetType AssetType = ESmartAssetType::ActorBlueprint;
+	ESmartUnderlyingAssetKind UnderlyingKind = ESmartUnderlyingAssetKind::Blueprint;
+
+	UPROPERTY()
+	ESmartBlueprintTemplateKind BlueprintTemplateKind = ESmartBlueprintTemplateKind::Normal;
+
+	UPROPERTY()
+	FString PrefixOverride;
+
+	UPROPERTY()
+	bool bHasPrefixOverride = false;
+
+	UPROPERTY()
+	FString PrefixFallback;
+
+	UPROPERTY()
+	bool bHasPrefixFallback = false;
 
 	UPROPERTY()
 	FString TargetFolder = TEXT("/Game");

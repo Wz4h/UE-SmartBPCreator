@@ -6,7 +6,7 @@
 
 bool FSmartMaterialInstanceCreator::CanCreate(const FSmartAssetCreateRequest& Request) const
 {
-	return Request.AssetType == ESmartAssetType::MaterialInstance;
+	return Request.UnderlyingKind == ESmartUnderlyingAssetKind::MaterialInstance;
 }
 
 FSmartAssetCreateResult FSmartMaterialInstanceCreator::Create(const FSmartAssetCreateRequest& Request, const FString& AssetName) const

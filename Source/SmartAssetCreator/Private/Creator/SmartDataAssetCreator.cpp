@@ -6,7 +6,7 @@
 
 bool FSmartDataAssetCreator::CanCreate(const FSmartAssetCreateRequest& Request) const
 {
-	return Request.AssetType == ESmartAssetType::DataAsset;
+	return Request.UnderlyingKind == ESmartUnderlyingAssetKind::DataAsset;
 }
 
 FSmartAssetCreateResult FSmartDataAssetCreator::Create(const FSmartAssetCreateRequest& Request, const FString& AssetName) const
@@ -16,6 +16,11 @@ FSmartAssetCreateResult FSmartDataAssetCreator::Create(const FSmartAssetCreateRe
 	if (!DataAssetClass->IsChildOf(UDataAsset::StaticClass()))
 	{
 		Result.ErrorMessage = TEXT("Data Asset requires a class derived from UDataAsset.");
+		return Result;
+	}
+	if (DataAssetClass->HasAnyClassFlags(CLASS_Abstract))
+	{
+		Result.ErrorMessage = TEXT("Data Asset requires a concrete, non-abstract class.");
 		return Result;
 	}
 

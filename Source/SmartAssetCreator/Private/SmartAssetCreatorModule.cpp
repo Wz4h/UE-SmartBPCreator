@@ -10,11 +10,15 @@
 #include "Core/SmartAssetCreateRequest.h"
 #include "Core/SmartAssetCreateResult.h"
 #include "Engine/Blueprint.h"
+#include "Editor.h"
 #include "Framework/Application/SlateApplication.h"
 #include "IContentBrowserSingleton.h"
+#include "ISettingsModule.h"
 #include "Interfaces/IPluginManager.h"
+#include "Kismet2/BlueprintEditorUtils.h"
 #include "Misc/PackageName.h"
 #include "Service/SmartAssetCreationService.h"
+#include "Settings/SmartAssetSettings.h"
 #include "Styling/SlateStyle.h"
 #include "Styling/SlateStyleRegistry.h"
 #include "ToolMenuEntry.h"
@@ -75,7 +79,7 @@ namespace
 			return;
 		}
 
-		const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("SmartBPCreator"));
+		const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("SmartAssetCreator"));
 		if (!Plugin.IsValid())
 		{
 			return;
@@ -117,6 +121,7 @@ void FSmartAssetCreatorModule::StartupModule()
 {
 	AssetCreationService = MakeUnique<FSmartAssetCreationService>();
 	RegisterSmartAssetCreatorStyle();
+	SettingsChangedHandle = USmartAssetSettings::OnSettingsChanged().AddRaw(this, &FSmartAssetCreatorModule::HandleSettingsChanged);
 
 	if (UToolMenus::IsToolMenuUIEnabled())
 	{
@@ -128,14 +133,58 @@ void FSmartAssetCreatorModule::StartupModule()
 
 void FSmartAssetCreatorModule::ShutdownModule()
 {
+	USmartAssetSettings::OnSettingsChanged().Remove(SettingsChangedHandle);
+	SettingsChangedHandle.Reset();
+
+	for (const TWeakPtr<SSmartAssetCreateWindow>& WidgetWeak : OpenCreateWidgets)
+	{
+		if (const TSharedPtr<SSmartAssetCreateWindow> Widget = WidgetWeak.Pin())
+		{
+			Widget->UnbindModuleCallbacks();
+		}
+	}
+	OpenCreateWidgets.Reset();
+
+	for (const TWeakPtr<SWindow>& WindowWeak : OpenCreateWindows)
+	{
+		if (const TSharedPtr<SWindow> Window = WindowWeak.Pin())
+		{
+			Window->SetOnWindowClosed(FOnWindowClosed());
+			Window->RequestDestroyWindow();
+		}
+	}
+	OpenCreateWindows.Reset();
+
 	if (UToolMenus::IsToolMenuUIEnabled())
 	{
 		UToolMenus::UnRegisterStartupCallback(ToolMenusStartupCallbackHandle);
 		UToolMenus::UnregisterOwner(this);
 	}
 
+	if (PendingRenameTickerHandle.IsValid())
+	{
+		FTSTicker::GetCoreTicker().RemoveTicker(PendingRenameTickerHandle);
+		PendingRenameTickerHandle.Reset();
+	}
+
 	AssetCreationService.Reset();
 	UnregisterSmartAssetCreatorStyle();
+}
+
+void FSmartAssetCreatorModule::HandleSettingsChanged()
+{
+	OpenCreateWidgets.RemoveAll([](const TWeakPtr<SSmartAssetCreateWindow>& WidgetWeak)
+	{
+		return !WidgetWeak.IsValid();
+	});
+
+	for (const TWeakPtr<SSmartAssetCreateWindow>& WidgetWeak : OpenCreateWidgets)
+	{
+		if (const TSharedPtr<SSmartAssetCreateWindow> Widget = WidgetWeak.Pin())
+		{
+			Widget->RefreshForSettingsChange();
+		}
+	}
 }
 
 void FSmartAssetCreatorModule::RegisterMenus()
@@ -145,6 +194,8 @@ void FSmartAssetCreatorModule::RegisterMenus()
 	{
 		return;
 	}
+
+	FToolMenuOwnerScoped OwnerScoped(this);
 
 	if (UToolMenu* Menu = ToolMenus->ExtendMenu(SmartAssetCreatorMenuNames::AddNewMenu))
 	{
@@ -168,7 +219,9 @@ void FSmartAssetCreatorModule::RegisterMenus()
 				}
 
 				UBlueprint* ParentBlueprint = Cast<UBlueprint>(Context->SelectedAssets[0].GetAsset());
-				if (!ParentBlueprint)
+				if (!ParentBlueprint
+					|| ParentBlueprint->BlueprintType == BPTYPE_Interface
+					|| !FBlueprintEditorUtils::CanCreateChildBlueprint(ParentBlueprint))
 				{
 					return;
 				}
@@ -179,16 +232,22 @@ void FSmartAssetCreatorModule::RegisterMenus()
 					FToolMenuInsert("CommonAssetActions", EToolMenuInsertType::Before)
 				);
 
-				Section.AddEntry(
+					const TWeakObjectPtr<UBlueprint> ParentBlueprintWeak = ParentBlueprint;
+					Section.AddEntry(
 					FToolMenuEntry::InitMenuEntry(
 						"SmartAssetCreator_CreateChild",
 						LOCTEXT("CreateChildAsset", "Create Child Asset..."),
 						LOCTEXT("CreateChildAssetTooltip", "Open Smart Asset Creator with this Blueprint as the parent."),
 						FSlateIcon(TEXT("SmartAssetCreatorStyle"), SmartAssetCreatorMenuNames::IconName),
-						FUIAction(FExecuteAction::CreateLambda([this, ParentBlueprint]()
-						{
-							OpenCreateWindow(FPackageName::GetLongPackagePath(ParentBlueprint->GetOutermost()->GetName()), ParentBlueprint);
-						}))
+							FUIAction(FExecuteAction::CreateLambda([this, ParentBlueprintWeak]()
+							{
+								if (UBlueprint* ValidParentBlueprint = ParentBlueprintWeak.Get())
+								{
+									OpenCreateWindow(
+										FPackageName::GetLongPackagePath(ValidParentBlueprint->GetOutermost()->GetName()),
+										ValidParentBlueprint);
+								}
+							}))
 					)
 				);
 			})
@@ -231,27 +290,44 @@ void FSmartAssetCreatorModule::PopulateAddNewMenu(UToolMenu* InMenu)
 
 void FSmartAssetCreatorModule::OpenCreateWindow(const FString& TargetFolder, UBlueprint* ParentBlueprint)
 {
-	const ESmartAssetType InitialAssetType = ParentBlueprint
-		? AssetCreationService->InferAssetTypeFromBlueprint(ParentBlueprint)
-		: ESmartAssetType::ActorBlueprint;
+	const ESmartUnderlyingAssetKind InitialUnderlyingKind = ESmartUnderlyingAssetKind::Blueprint;
 
 	TSharedRef<SWindow> Window = SNew(SWindow)
 		.Title(LOCTEXT("SmartAssetCreatorWindowTitle", "Smart Asset Creator"))
-		.ClientSize(FVector2D(620.0f, 520.0f));
+		.ClientSize(FVector2D(620.0f, 520.0f))
+		.MinWidth(620.0f)
+		.MinHeight(520.0f)
+		.SizingRule(ESizingRule::UserSized);
 
-	Window->SetContent(
+	TSharedRef<SSmartAssetCreateWindow> CreateWidget =
 		SNew(SSmartAssetCreateWindow)
-		.ParentWindow(Window)
-		.TargetFolder(TargetFolder)
-		.InitialAssetType(InitialAssetType)
-		.LockAssetType(ParentBlueprint != nullptr)
-		.InitialParentBlueprint(ParentBlueprint)
-		.OnCreateRequested(FOnSmartAssetCreateRequested::CreateRaw(this, &FSmartAssetCreatorModule::HandleCreateRequest))
-		.OnPreviewRequested(FOnSmartAssetPreviewRequested::CreateRaw(this, &FSmartAssetCreatorModule::HandlePreviewRequest))
-		.OnDefaultClassRequested(FOnSmartAssetDefaultClassRequested::CreateRaw(this, &FSmartAssetCreatorModule::HandleDefaultClassRequest))
-	);
+			.ParentWindow(Window)
+			.TargetFolder(TargetFolder)
+			.InitialUnderlyingKind(InitialUnderlyingKind)
+			.LockCreationOption(false)
+			.InitialParentBlueprint(ParentBlueprint)
+			.OnCreateRequested(FOnSmartAssetCreateRequested::CreateRaw(this, &FSmartAssetCreatorModule::HandleCreateRequest))
+			.OnPreviewRequested(FOnSmartAssetPreviewRequested::CreateRaw(this, &FSmartAssetCreatorModule::HandlePreviewRequest))
+			.OnValidationRequested(FOnSmartAssetValidationRequested::CreateRaw(this, &FSmartAssetCreatorModule::HandleValidationRequest))
+			.OnOpenSettingsRequested(FOnSmartAssetOpenSettingsRequested::CreateRaw(this, &FSmartAssetCreatorModule::HandleOpenSettingsRequest));
+
+	Window->SetContent(CreateWidget);
+	const TWeakPtr<SSmartAssetCreateWindow> CreateWidgetWeak = CreateWidget;
+	Window->SetOnWindowClosed(FOnWindowClosed::CreateLambda([this, CreateWidgetWeak](const TSharedRef<SWindow>& ClosedWindow)
+	{
+		OpenCreateWindows.RemoveAll([&ClosedWindow](const TWeakPtr<SWindow>& WindowWeak)
+		{
+			return !WindowWeak.IsValid() || WindowWeak.Pin() == ClosedWindow;
+		});
+		OpenCreateWidgets.RemoveAll([&CreateWidgetWeak](const TWeakPtr<SSmartAssetCreateWindow>& WidgetWeak)
+		{
+			return !WidgetWeak.IsValid() || WidgetWeak.Pin() == CreateWidgetWeak.Pin();
+		});
+	}));
 
 	FSlateApplication::Get().AddWindow(Window);
+	OpenCreateWindows.Add(Window);
+	OpenCreateWidgets.Add(CreateWidget);
 }
 FString FSmartAssetCreatorModule::ConvertMenuPathToInternalPath(FName InMenuPath) const
 {
@@ -292,9 +368,17 @@ FString FSmartAssetCreatorModule::HandlePreviewRequest(const FSmartAssetCreateRe
 	return AssetCreationService->BuildAssetNamePreview(Request);
 }
 
-UClass* FSmartAssetCreatorModule::HandleDefaultClassRequest(ESmartAssetType AssetType) const
+FString FSmartAssetCreatorModule::HandleValidationRequest(const FSmartAssetCreateRequest& Request) const
 {
-	return AssetCreationService->GetDefaultParentClass(AssetType);
+	return AssetCreationService->ValidateRequest(Request);
+}
+
+void FSmartAssetCreatorModule::HandleOpenSettingsRequest() const
+{
+	FModuleManager::LoadModuleChecked<ISettingsModule>("Settings").ShowViewer(
+		TEXT("Project"),
+		TEXT("Plugins"),
+		TEXT("SmartAssetCreator"));
 }
 
 void FSmartAssetCreatorModule::FocusAndRenameAsset(UObject* Asset) const
@@ -314,9 +398,16 @@ void FSmartAssetCreatorModule::FocusAndRenameAsset(UObject* Asset) const
 	ContentBrowser.SyncBrowserToAssets(Assets);
 	ContentBrowser.FocusPrimaryContentBrowser(false);
 
-	FTSTicker::GetCoreTicker().AddTicker(
-		FTickerDelegate::CreateLambda([](float)
+	if (PendingRenameTickerHandle.IsValid())
+	{
+		FTSTicker::GetCoreTicker().RemoveTicker(PendingRenameTickerHandle);
+		PendingRenameTickerHandle.Reset();
+	}
+
+	PendingRenameTickerHandle = FTSTicker::GetCoreTicker().AddTicker(
+		FTickerDelegate::CreateLambda([this](float)
 		{
+			PendingRenameTickerHandle.Reset();
 			if (!FModuleManager::Get().IsModuleLoaded("ContentBrowser"))
 			{
 				return false;

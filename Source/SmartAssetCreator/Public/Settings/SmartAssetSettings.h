@@ -5,7 +5,9 @@
 #include "Rule/SmartAssetPrefixRule.h"
 #include "SmartAssetSettings.generated.h"
 
-UCLASS(Config = EditorPerProjectUserSettings, DefaultConfig, meta = (DisplayName = "Smart Asset Creator"))
+DECLARE_MULTICAST_DELEGATE(FOnSmartAssetSettingsChanged);
+
+UCLASS(Config = Editor, DefaultConfig, meta = (DisplayName = "Smart Asset Creator"))
 class SMARTASSETCREATOR_API USmartAssetSettings : public UDeveloperSettings
 {
 	GENERATED_BODY()
@@ -18,6 +20,11 @@ public:
 	virtual FName GetSectionName() const override;
 	virtual FText GetSectionText() const override;
 	virtual FText GetSectionDescription() const override;
+#if WITH_EDITOR
+	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+#endif
+
+	static FOnSmartAssetSettingsChanged& OnSettingsChanged();
 
 	UPROPERTY(EditAnywhere, Config, Category = "Asset Type Prefixes", meta = (DisplayName = "Data Table Prefix", ToolTip = "Prefix used when creating Data Table assets."))
 	FString DataTablePrefix;

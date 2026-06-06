@@ -1,5 +1,10 @@
 #include "Settings/SmartAssetSettings.h"
 
+namespace
+{
+	FOnSmartAssetSettingsChanged GOnSmartAssetSettingsChanged;
+}
+
 USmartAssetSettings::USmartAssetSettings()
 {
 	DataTablePrefix = TEXT("DT_");
@@ -60,4 +65,17 @@ FText USmartAssetSettings::GetSectionDescription() const
 		"SettingsSectionDescription",
 		"Configure class prefix rules for class-based assets, fixed prefixes for non-class asset types, and child blueprint naming rules."
 	);
+}
+
+#if WITH_EDITOR
+void USmartAssetSettings::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
+{
+	Super::PostEditChangeProperty(PropertyChangedEvent);
+	GOnSmartAssetSettingsChanged.Broadcast();
+}
+#endif
+
+FOnSmartAssetSettingsChanged& USmartAssetSettings::OnSettingsChanged()
+{
+	return GOnSmartAssetSettingsChanged;
 }
