@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Wz4h. All Rights Reserved.
 #include "Settings/SmartAssetSettings.h"
 
 namespace
@@ -11,6 +12,7 @@ USmartAssetSettings::USmartAssetSettings()
 	MaterialPrefix = TEXT("M_");
 	MaterialInstancePrefix = TEXT("MI_");
 	ChildBlueprintSuffix = TEXT("_Child");
+	CreateWindowSize = FVector2D(620.0f, 520.0f);
 
 	if (PrefixRules.IsEmpty())
 	{

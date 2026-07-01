@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Wz4h. All Rights Reserved.
 #include "Misc/AutomationTest.h"
 
 #if WITH_DEV_AUTOMATION_TESTS

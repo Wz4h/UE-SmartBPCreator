@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Wz4h. All Rights Reserved.
 #include "Service/SmartCreationOptionBuilder.h"
 
 #include "Animation/AnimInstance.h"

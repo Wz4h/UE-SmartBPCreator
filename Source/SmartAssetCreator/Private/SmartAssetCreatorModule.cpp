@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Wz4h. All Rights Reserved.
 #include "SmartAssetCreatorModule.h"
 
 #include "Blueprint/UserWidget.h"
@@ -291,13 +292,25 @@ void FSmartAssetCreatorModule::PopulateAddNewMenu(UToolMenu* InMenu)
 void FSmartAssetCreatorModule::OpenCreateWindow(const FString& TargetFolder, UBlueprint* ParentBlueprint)
 {
 	const ESmartUnderlyingAssetKind InitialUnderlyingKind = ESmartUnderlyingAssetKind::Blueprint;
+	constexpr float MinCreateWindowWidth = 620.0f;
+	constexpr float MinCreateWindowHeight = 520.0f;
+
+	const USmartAssetSettings* Settings = GetDefault<USmartAssetSettings>();
+	const FVector2D SavedWindowSize = Settings ? Settings->CreateWindowSize : FVector2D(MinCreateWindowWidth, MinCreateWindowHeight);
+	const FVector2D InitialWindowSize(
+		FMath::Max(SavedWindowSize.X, MinCreateWindowWidth),
+		FMath::Max(SavedWindowSize.Y, MinCreateWindowHeight)
+	);
 
 	TSharedRef<SWindow> Window = SNew(SWindow)
 		.Title(LOCTEXT("SmartAssetCreatorWindowTitle", "Smart Asset Creator"))
-		.ClientSize(FVector2D(620.0f, 520.0f))
-		.MinWidth(620.0f)
-		.MinHeight(520.0f)
-		.SizingRule(ESizingRule::UserSized);
+		.ClientSize(InitialWindowSize)
+		.MinWidth(MinCreateWindowWidth)
+		.MinHeight(MinCreateWindowHeight)
+		.SizingRule(ESizingRule::UserSized)
+		.SupportsMinimize(true)
+		.SupportsMaximize(false)
+		.HasCloseButton(true);
 
 	TSharedRef<SSmartAssetCreateWindow> CreateWidget =
 		SNew(SSmartAssetCreateWindow)
@@ -313,8 +326,18 @@ void FSmartAssetCreatorModule::OpenCreateWindow(const FString& TargetFolder, UBl
 
 	Window->SetContent(CreateWidget);
 	const TWeakPtr<SSmartAssetCreateWindow> CreateWidgetWeak = CreateWidget;
-	Window->SetOnWindowClosed(FOnWindowClosed::CreateLambda([this, CreateWidgetWeak](const TSharedRef<SWindow>& ClosedWindow)
+	Window->SetOnWindowClosed(FOnWindowClosed::CreateLambda([this, CreateWidgetWeak, MinCreateWindowWidth, MinCreateWindowHeight](const TSharedRef<SWindow>& ClosedWindow)
 	{
+		if (USmartAssetSettings* MutableSettings = GetMutableDefault<USmartAssetSettings>())
+		{
+			const FVector2D ClosedWindowSize = ClosedWindow->GetSizeInScreen();
+			MutableSettings->CreateWindowSize = FVector2D(
+				FMath::Max(ClosedWindowSize.X, MinCreateWindowWidth),
+				FMath::Max(ClosedWindowSize.Y, MinCreateWindowHeight)
+			);
+			MutableSettings->SaveConfig();
+		}
+
 		OpenCreateWindows.RemoveAll([&ClosedWindow](const TWeakPtr<SWindow>& WindowWeak)
 		{
 			return !WindowWeak.IsValid() || WindowWeak.Pin() == ClosedWindow;

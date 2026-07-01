@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Wz4h. All Rights Reserved.
 #include "UI/SSmartAssetCreateWindow.h"
 
 #include "AssetRegistry/AssetData.h"
@@ -51,8 +52,16 @@ namespace
 			const UClass* InClass,
 			TSharedRef<FClassViewerFilterFuncs> InFilterFuncs) override
 		{
-			const bool bMatchesBaseClass = bAllowDerivedClasses ? InClass && InClass->IsChildOf(BaseClass) : InClass == BaseClass;
-			return BaseClass && bMatchesBaseClass && !InClass->HasAnyClassFlags(CLASS_Abstract | CLASS_Deprecated | CLASS_NewerVersionExists);
+			if (!BaseClass || !InClass)
+			{
+				return false;
+			}
+
+			const bool bMatchesBaseClass = bAllowDerivedClasses ? InClass->IsChildOf(BaseClass) : InClass == BaseClass;
+			const bool bIsObjectRootClass = BaseClass == UObject::StaticClass() && InClass == UObject::StaticClass();
+			const bool bHasDisallowedFlags = InClass->HasAnyClassFlags(CLASS_Deprecated | CLASS_NewerVersionExists)
+				|| (InClass->HasAnyClassFlags(CLASS_Abstract) && !bIsObjectRootClass);
+			return bMatchesBaseClass && !bHasDisallowedFlags;
 		}
 
 		virtual bool IsUnloadedClassAllowed(
@@ -224,7 +233,6 @@ void SSmartAssetCreateWindow::Construct(const FArguments& InArgs)
 	];
 
 	RefreshClassViewer();
-	EnsureWindowSizeForCurrentOption();
 }
 
 void SSmartAssetCreateWindow::AddReferencedObjects(FReferenceCollector& Collector)
@@ -288,7 +296,6 @@ TSharedRef<SWidget> SSmartAssetCreateWindow::BuildCreationOptionPicker()
 					SelectedParentMaterial = nullptr;
 					bTemplateAnimBlueprint = false;
 					RefreshDefaultsForCreationOption();
-					EnsureWindowSizeForCurrentOption();
 					InvalidatePreview();
 				}
 			})
@@ -622,7 +629,6 @@ void SSmartAssetCreateWindow::RefreshForSettingsChange()
 	}
 
 	RefreshClassViewer();
-	EnsureWindowSizeForCurrentOption();
 	InvalidatePreview();
 }
 
@@ -655,25 +661,6 @@ void SSmartAssetCreateWindow::RefreshClassViewer()
 	if (ClassViewerContainer.IsValid())
 	{
 		ClassViewerContainer->SetContent(CreateClassViewerWidget());
-	}
-}
-
-void SSmartAssetCreateWindow::EnsureWindowSizeForCurrentOption() const
-{
-	const FVector2D TargetSize = IsAnimBlueprintOption()
-		? FVector2D(620.0f, 650.0f)
-		: FVector2D(620.0f, 520.0f);
-
-	const TSharedPtr<SWindow> ParentWindow = ParentWindowWeak.Pin();
-	if (!ParentWindow.IsValid())
-	{
-		return;
-	}
-
-	const FVector2D CurrentSize = ParentWindow->GetSizeInScreen();
-	if (!CurrentSize.Equals(TargetSize, KINDA_SMALL_NUMBER))
-	{
-		ParentWindow->Resize(TargetSize);
 	}
 }
 

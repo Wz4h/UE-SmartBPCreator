@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Wz4h. All Rights Reserved.
 #pragma once
 
 #include "CoreMinimal.h"

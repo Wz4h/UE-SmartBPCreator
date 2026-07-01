@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Wz4h. All Rights Reserved.
+
 using UnrealBuildTool;
 
 public class SmartAssetCreator : ModuleRules
